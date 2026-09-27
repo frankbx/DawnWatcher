@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Test and analysis output
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# IDE and OS files
+.DS_Store
+.idea/
+.vscode/
+
+# Runtime data; keep the directory skeleton only
+data/**/*
+!data/**/
+!data/**/.gitkeep
