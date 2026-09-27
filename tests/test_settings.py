@@ -16,11 +16,21 @@ def test_default_settings() -> None:
     assert settings.environment is Environment.DEVELOPMENT
     assert settings.timezone == "Asia/Shanghai"
     assert settings.data_dir == Path("data")
+    assert settings.market_poll_interval_seconds == 15.0
+    assert settings.tushare_token_file == Path("token")
 
 
 def test_invalid_timezone_is_rejected() -> None:
     with pytest.raises(ValidationError, match="unknown IANA timezone"):
         Settings(timezone="Mars/Olympus", _env_file=None)
+
+
+def test_poll_interval_can_be_overridden_from_environment(monkeypatch: object) -> None:
+    monkeypatch.setenv("DAWNWATCHER_MARKET_POLL_INTERVAL_SECONDS", "30")  # type: ignore[attr-defined]
+
+    settings = Settings(_env_file=None)
+
+    assert settings.market_poll_interval_seconds == 30.0
 
 
 def test_database_filename_cannot_escape_managed_directory() -> None:

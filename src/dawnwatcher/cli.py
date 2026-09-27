@@ -3,20 +3,53 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
+import signal
 from collections.abc import Sequence
 from dataclasses import asdict
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
+
+from sqlalchemy.orm import Session, sessionmaker
 
 from dawnwatcher import __version__
 from dawnwatcher.config import Settings
+from dawnwatcher.domain.quotes import MarketCollectionResult
 from dawnwatcher.logging import configure_logging
+from dawnwatcher.market import MarketPhase, MarketSessionStatus
+from dawnwatcher.market.gate import TushareTradingSessionGate
 from dawnwatcher.ops.health import run_startup_checks
 from dawnwatcher.ops.recovery import run_startup_recovery
+from dawnwatcher.providers.collector import MarketDataCollector, parse_symbols, replay_archive
 from dawnwatcher.storage.backup import online_backup
 from dawnwatcher.storage.database import create_database_engine, create_session_factory
+from dawnwatcher.storage.market_quotes import persist_market_collection
 from dawnwatcher.storage.schema import inspect_schema, upgrade_database
+from dawnwatcher.workflows.interval import FixedIntervalScheduler, IntervalScheduleResult
+
+
+def _poll_interval_seconds(value: str) -> float:
+    """Parse a safe provider polling interval from the CLI."""
+    try:
+        interval = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("interval must be a number") from exc
+    if not 1.0 <= interval <= 3_600.0:
+        raise argparse.ArgumentTypeError("interval must be between 1 and 3600 seconds")
+    return interval
+
+
+def _positive_integer(value: str) -> int:
+    """Parse a strictly positive integer from the CLI."""
+    try:
+        result = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("value must be an integer") from exc
+    if result < 1:
+        raise argparse.ArgumentTypeError("value must be at least one")
+    return result
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -44,6 +77,84 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Destination file; defaults to a timestamped file under data/backups.",
     )
+
+    calendar_parser = subparsers.add_parser(
+        "calendar", help="Synchronize and inspect the cached Tushare trading calendar."
+    )
+    calendar_commands = calendar_parser.add_subparsers(dest="calendar_command", required=True)
+    sync_parser = calendar_commands.add_parser(
+        "sync", help="Fetch an inclusive trade_cal range from Tushare."
+    )
+    sync_parser.add_argument("--start-date", type=date.fromisoformat)
+    sync_parser.add_argument("--end-date", type=date.fromisoformat)
+    status_parser = calendar_commands.add_parser(
+        "status", help="Classify a time using the local calendar, refreshing if needed."
+    )
+    status_parser.add_argument(
+        "--at",
+        type=datetime.fromisoformat,
+        help="Timezone-aware ISO timestamp; defaults to now.",
+    )
+
+    quote_parser = subparsers.add_parser("quotes", help="Collect or replay market quotes.")
+    quote_commands = quote_parser.add_subparsers(dest="quote_command", required=True)
+    collect_parser = quote_commands.add_parser(
+        "collect", help="Collect one concurrent Sina/Tencent snapshot."
+    )
+    collect_parser.add_argument(
+        "symbols", nargs="+", help="Tushare ts_code values such as 600000.SH."
+    )
+    collect_parser.add_argument(
+        "--expected-date",
+        type=date.fromisoformat,
+        help="Expected quote trade date in YYYY-MM-DD form.",
+    )
+    collect_parser.add_argument("--idempotency-key", help="Stable persistence key for this cycle.")
+    collect_parser.add_argument(
+        "--no-archive", action="store_true", help="Do not archive raw provider responses."
+    )
+    collect_parser.add_argument(
+        "--no-persist", action="store_true", help="Do not persist normalized snapshots."
+    )
+    collect_parser.add_argument(
+        "--ignore-market-gate",
+        action="store_true",
+        help="Diagnostic override: request quotes outside an active auction phase.",
+    )
+    watch_parser = quote_commands.add_parser(
+        "watch", help="Continuously collect non-overlapping Sina/Tencent snapshots."
+    )
+    watch_parser.add_argument(
+        "symbols", nargs="+", help="Tushare ts_code values such as 600000.SH."
+    )
+    watch_parser.add_argument(
+        "--expected-date",
+        type=date.fromisoformat,
+        help="Expected quote trade date in YYYY-MM-DD form.",
+    )
+    watch_parser.add_argument(
+        "--interval",
+        "--interval-seconds",
+        dest="interval_seconds",
+        type=_poll_interval_seconds,
+        help="Seconds between scheduled starts; defaults to configured value (15).",
+    )
+    watch_parser.add_argument(
+        "--max-runs",
+        type=_positive_integer,
+        help="Stop after this many runs; omitted means run until SIGINT or SIGTERM.",
+    )
+    watch_parser.add_argument(
+        "--no-archive", action="store_true", help="Do not archive raw provider responses."
+    )
+    watch_parser.add_argument(
+        "--no-persist", action="store_true", help="Do not persist normalized snapshots."
+    )
+    replay_parser = quote_commands.add_parser(
+        "replay", help="Parse and validate one archived provider response."
+    )
+    replay_parser.add_argument("archive", type=Path)
+    replay_parser.add_argument("--expected-date", type=date.fromisoformat)
     return parser
 
 
@@ -70,6 +181,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "db":
         return _run_database_command(settings, args)
+
+    if args.command == "calendar":
+        return _run_calendar_command(settings, args)
+
+    if args.command == "quotes":
+        return _run_quote_command(settings, args)
 
     parser.error(f"unknown command: {args.command}")
 
@@ -108,3 +225,299 @@ def _run_database_command(settings: Settings, args: argparse.Namespace) -> int:
         return 0
 
     raise ValueError(f"unsupported database command: {args.database_command}")
+
+
+def _run_calendar_command(settings: Settings, args: argparse.Namespace) -> int:
+    """Synchronize or inspect the cached Tushare trade_cal calendar."""
+    local_now = datetime.now(ZoneInfo(settings.timezone))
+    if args.calendar_command == "sync":
+        start_date = args.start_date or date(local_now.year, 1, 1)
+        end_date = args.end_date or date(local_now.year, 12, 31)
+        if end_date < start_date:
+            raise ValueError("calendar end date cannot be before start date")
+        payload = asyncio.run(_synchronize_calendar(settings, start_date, end_date))
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.calendar_command == "status":
+        observed_at = args.at or datetime.now(UTC)
+        if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+            raise ValueError("--at must include a timezone offset")
+        payload = asyncio.run(_calendar_status(settings, observed_at))
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0 if payload["calendar_date_known"] else 1
+
+    raise ValueError(f"unsupported calendar command: {args.calendar_command}")
+
+
+def _run_quote_command(settings: Settings, args: argparse.Namespace) -> int:
+    """Execute a live collection or deterministic raw-response replay."""
+    if args.quote_command == "collect":
+        market_phase: MarketPhase | None = None
+        expected_trade_date = args.expected_date
+        if not args.ignore_market_gate:
+            session_status, coverage = asyncio.run(
+                _load_market_session_status(settings, datetime.now(UTC))
+            )
+            if not session_status.collect_quotes:
+                print(
+                    json.dumps(
+                        {
+                            "event": "market.collection.skipped",
+                            **session_status.to_dict(),
+                            "calendar_coverage": coverage,
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+                return 0
+            market_phase = session_status.phase
+            expected_trade_date = expected_trade_date or session_status.trade_date
+        result = asyncio.run(
+            _collect_quotes(
+                settings,
+                args.symbols,
+                expected_trade_date=expected_trade_date,
+                idempotency_key=args.idempotency_key,
+                archive_raw=not args.no_archive,
+                market_phase=market_phase,
+            )
+        )
+        if not args.no_persist:
+            engine = create_database_engine(settings)
+            try:
+                with create_session_factory(engine).begin() as session:
+                    persist_market_collection(session, result)
+            finally:
+                engine.dispose()
+        print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+        return 0
+
+    if args.quote_command == "replay":
+        replayed = replay_archive(
+            args.archive,
+            expected_trade_date=args.expected_date,
+        )
+        payload = {
+            "summary": replayed.to_summary(),
+            "quotes": {symbol: quote.to_dict() for symbol, quote in replayed.quotes.items()},
+            "quote_issues": {
+                symbol: [issue.to_dict() for issue in issues]
+                for symbol, issues in replayed.quote_issues.items()
+            },
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.quote_command == "watch":
+        interval_seconds = args.interval_seconds or settings.market_poll_interval_seconds
+        try:
+            schedule = asyncio.run(
+                _watch_quotes(
+                    settings,
+                    args.symbols,
+                    expected_trade_date=args.expected_date,
+                    interval_seconds=interval_seconds,
+                    max_runs=args.max_runs,
+                    archive_raw=not args.no_archive,
+                    persist=not args.no_persist,
+                )
+            )
+        except KeyboardInterrupt:
+            return 130
+        print(
+            json.dumps(
+                {"event": "market.schedule.stopped", **schedule.to_dict()},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            flush=True,
+        )
+        return 0 if schedule.failed_runs == 0 else 1
+
+    raise ValueError(f"unsupported quote command: {args.quote_command}")
+
+
+async def _collect_quotes(
+    settings: Settings,
+    symbol_values: list[str],
+    *,
+    expected_trade_date: date | None,
+    idempotency_key: str | None,
+    archive_raw: bool,
+    market_phase: MarketPhase | None,
+) -> MarketCollectionResult:
+    symbols = parse_symbols(symbol_values)
+    async with MarketDataCollector(settings) as collector:
+        return await collector.collect(
+            symbols,
+            expected_trade_date=expected_trade_date,
+            idempotency_key=idempotency_key,
+            archive_raw=archive_raw,
+            market_phase=market_phase,
+        )
+
+
+async def _watch_quotes(
+    settings: Settings,
+    symbol_values: list[str],
+    *,
+    expected_trade_date: date | None,
+    interval_seconds: float,
+    max_runs: int | None,
+    archive_raw: bool,
+    persist: bool,
+) -> IntervalScheduleResult:
+    """Continuously collect quotes while retaining one collector and connection pool."""
+    symbols = parse_symbols(symbol_values)
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    registered_signals: list[signal.Signals] = []
+    for watched_signal in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(watched_signal, stop_event.set)
+        except (NotImplementedError, RuntimeError):
+            continue
+        registered_signals.append(watched_signal)
+
+    engine = create_database_engine(settings)
+    session_factory = create_session_factory(engine)
+    gate = _build_trading_session_gate(settings, session_factory)
+    initial_status = await gate.status_at(datetime.now(UTC))
+    print(
+        json.dumps(
+            {
+                "event": "market.schedule.started",
+                "interval_seconds": interval_seconds,
+                "symbols": [symbol.ts_code for symbol in symbols],
+                "archive_raw": archive_raw,
+                "persist": persist,
+                "max_runs": max_runs,
+                "market_gate": initial_status.to_dict(),
+                "calendar_coverage": _coverage_payload(gate),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+        flush=True,
+    )
+
+    try:
+        async with MarketDataCollector(settings) as collector:
+            last_session: tuple[date, str] | None = None
+
+            async def collect_once(run_number: int) -> bool:
+                nonlocal last_session
+                session_status = await gate.status_at(datetime.now(UTC))
+                session_key = (session_status.trade_date, session_status.phase.value)
+                if session_key != last_session:
+                    print(
+                        json.dumps(
+                            {"event": "market.session.changed", **session_status.to_dict()},
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
+                        flush=True,
+                    )
+                    last_session = session_key
+                if not session_status.collect_quotes:
+                    return False
+                result = await collector.collect(
+                    symbols,
+                    expected_trade_date=expected_trade_date or session_status.trade_date,
+                    archive_raw=archive_raw,
+                    market_phase=session_status.phase,
+                )
+                if persist:
+                    with session_factory.begin() as session:
+                        persist_market_collection(session, result)
+                payload = result.to_dict(include_quotes=False)
+                print(
+                    json.dumps(
+                        {
+                            "event": "market.collection.completed",
+                            "run_number": run_number,
+                            **payload,
+                        },
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                    flush=True,
+                )
+                return True
+
+            return await FixedIntervalScheduler(interval_seconds).run(
+                collect_once,
+                stop_event=stop_event,
+                max_runs=max_runs,
+            )
+    finally:
+        engine.dispose()
+        for registered_signal in registered_signals:
+            loop.remove_signal_handler(registered_signal)
+
+
+def _build_trading_session_gate(
+    settings: Settings,
+    session_factory: sessionmaker[Session],
+) -> TushareTradingSessionGate:
+    """Build the Tushare-backed market gate from non-secret settings."""
+    return TushareTradingSessionGate(
+        session_factory,
+        timezone=settings.timezone,
+        exchange=settings.trading_calendar_exchange,
+        token_file=settings.tushare_token_file,
+        api_url=settings.tushare_api_url,
+        timeout_seconds=settings.market_request_timeout_seconds,
+        refresh_hours=settings.trading_calendar_refresh_hours,
+    )
+
+
+async def _synchronize_calendar(
+    settings: Settings,
+    start_date: date,
+    end_date: date,
+) -> dict[str, object]:
+    engine = create_database_engine(settings)
+    try:
+        gate = _build_trading_session_gate(settings, create_session_factory(engine))
+        await gate.force_refresh(start_date=start_date, end_date=end_date)
+        return {
+            "ok": True,
+            "source": "tushare.trade_cal",
+            **_coverage_payload(gate),
+        }
+    finally:
+        engine.dispose()
+
+
+async def _calendar_status(settings: Settings, observed_at: datetime) -> dict[str, object]:
+    status, coverage = await _load_market_session_status(settings, observed_at)
+    return {**status.to_dict(), "calendar_coverage": coverage}
+
+
+async def _load_market_session_status(
+    settings: Settings,
+    observed_at: datetime,
+) -> tuple[MarketSessionStatus, dict[str, object]]:
+    engine = create_database_engine(settings)
+    try:
+        gate = _build_trading_session_gate(settings, create_session_factory(engine))
+        status = await gate.status_at(observed_at)
+        return status, _coverage_payload(gate)
+    finally:
+        engine.dispose()
+
+
+def _coverage_payload(gate: TushareTradingSessionGate) -> dict[str, object]:
+    coverage = gate.coverage
+    return {
+        "exchange": coverage.exchange,
+        "start_date": coverage.start_date.isoformat() if coverage.start_date else None,
+        "end_date": coverage.end_date.isoformat() if coverage.end_date else None,
+        "row_count": coverage.row_count,
+        "last_fetched_at": (
+            coverage.last_fetched_at.isoformat() if coverage.last_fetched_at else None
+        ),
+    }

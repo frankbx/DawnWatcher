@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from dawnwatcher.cli import main
+import pytest
+
+from dawnwatcher.cli import build_parser, main
 
 
 def test_cli_without_command_prints_help(capsys: object) -> None:
@@ -46,3 +48,34 @@ def test_config_uses_environment_overrides(
 
     assert config["environment"] == "test"
     assert config["data_dir"] == str(tmp_path)
+
+
+def test_quote_watch_uses_configured_interval_by_default() -> None:
+    args = build_parser().parse_args(["quotes", "watch", "600000.SH"])
+
+    assert args.interval_seconds is None
+    assert args.max_runs is None
+
+
+def test_quote_watch_accepts_interval_override() -> None:
+    args = build_parser().parse_args(
+        ["quotes", "watch", "600000.SH", "--interval", "30", "--max-runs", "2"]
+    )
+
+    assert args.interval_seconds == 30.0
+    assert args.max_runs == 2
+
+
+def test_quote_watch_rejects_unsafe_interval() -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["quotes", "watch", "600000.SH", "--interval", "0.1"])
+
+
+def test_one_shot_collection_is_gated_unless_explicitly_overridden() -> None:
+    regular = build_parser().parse_args(["quotes", "collect", "600000.SH"])
+    diagnostic = build_parser().parse_args(
+        ["quotes", "collect", "600000.SH", "--ignore-market-gate"]
+    )
+
+    assert regular.ignore_market_gate is False
+    assert diagnostic.ignore_market_gate is True

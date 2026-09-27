@@ -13,6 +13,7 @@ venv/
 .env
 .env.*
 !.env.example
+token
 
 # Test and analysis output
 .coverage
@@ -31,3 +32,5 @@ htmlcov/
 data/**/*
 !data/**/
 !data/**/.gitkeep
+
+token

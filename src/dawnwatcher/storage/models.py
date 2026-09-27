@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     Date,
     ForeignKey,
     Index,
     Integer,
     MetaData,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -23,7 +26,14 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-from dawnwatcher.domain import JobStatus, NotificationStatus
+from dawnwatcher.domain import (
+    DataQualityState,
+    Exchange,
+    JobStatus,
+    NotificationStatus,
+    QuoteProvider,
+)
+from dawnwatcher.market import MarketPhase
 from dawnwatcher.storage.types import UTCDateTime
 
 NAMING_CONVENTION = {
@@ -189,3 +199,170 @@ class AuditEvent(Base):
     correlation_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON(), default=dict, nullable=False)
     occurred_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
+
+
+class MarketCollectionRun(Base):
+    """Metadata for one idempotent dual-provider collection cycle."""
+
+    __tablename__ = "market_collection_run"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_market_collection_run_idempotency_key"),
+        Index("ix_market_collection_run_started_at", "started_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    expected_trade_date: Mapped[date | None] = mapped_column(Date(), nullable=True)
+    market_phase: Mapped[MarketPhase | None] = mapped_column(
+        SAEnum(
+            MarketPhase,
+            native_enum=False,
+            values_callable=lambda enum_type: [member.value for member in enum_type],
+            length=32,
+        ),
+        nullable=True,
+    )
+    requested_symbols: Mapped[list[str]] = mapped_column(JSON(), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    finished_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    provider_summaries: Mapped[dict[str, Any]] = mapped_column(JSON(), nullable=False)
+    quality_counts: Mapped[dict[str, int]] = mapped_column(JSON(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
+
+
+class TradingCalendarDay(Base):
+    """Locally cached Tushare trade_cal row used by the runtime gate."""
+
+    __tablename__ = "trading_calendar_day"
+    __table_args__ = (
+        UniqueConstraint("exchange", "cal_date", name="uq_trading_calendar_day_exchange_date"),
+        Index("ix_trading_calendar_day_date_open", "cal_date", "is_open"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    exchange: Mapped[str] = mapped_column(String(10), nullable=False)
+    cal_date: Mapped[date] = mapped_column(Date(), nullable=False)
+    is_open: Mapped[bool] = mapped_column(Boolean(), nullable=False)
+    pretrade_date: Mapped[date | None] = mapped_column(Date(), nullable=True)
+    source: Mapped[str] = mapped_column(String(20), default="tushare", nullable=False)
+    source_fetched_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+
+class ProviderQuoteSnapshot(Base):
+    """Normalized but provider-isolated quote snapshot."""
+
+    __tablename__ = "provider_quote_snapshot"
+    __table_args__ = (
+        UniqueConstraint(
+            "collection_id",
+            "provider",
+            "symbol",
+            name="uq_provider_quote_snapshot_collection_provider_symbol",
+        ),
+        Index(
+            "ix_provider_quote_snapshot_symbol_time",
+            "symbol",
+            "quote_at",
+            "provider",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    collection_id: Mapped[str] = mapped_column(
+        ForeignKey("market_collection_run.id", ondelete="CASCADE"), nullable=False
+    )
+    provider: Mapped[QuoteProvider] = mapped_column(
+        SAEnum(
+            QuoteProvider,
+            native_enum=False,
+            values_callable=lambda enum_type: [member.value for member in enum_type],
+            length=20,
+        ),
+        nullable=False,
+    )
+    symbol: Mapped[str] = mapped_column(String(9), nullable=False)
+    exchange: Mapped[Exchange] = mapped_column(
+        SAEnum(
+            Exchange,
+            native_enum=False,
+            values_callable=lambda enum_type: [member.value for member in enum_type],
+            length=10,
+        ),
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    quote_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    fetched_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    open: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    previous_close: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    latest: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    high: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    low: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    volume_shares: Mapped[int] = mapped_column(BigInteger(), nullable=False)
+    amount_cny: Mapped[Decimal] = mapped_column(Numeric(24, 4), nullable=False)
+    bid1_price: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    bid1_volume_shares: Mapped[int] = mapped_column(BigInteger(), nullable=False)
+    ask1_price: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    ask1_volume_shares: Mapped[int] = mapped_column(BigInteger(), nullable=False)
+    volume_precision_shares: Mapped[int] = mapped_column(Integer(), nullable=False)
+    raw_field_count: Mapped[int] = mapped_column(Integer(), nullable=False)
+    validation_issues: Mapped[list[dict[str, Any]]] = mapped_column(JSON(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
+
+
+class ReconciledQuoteSnapshot(Base):
+    """Decision-facing data quality for one symbol and collection cycle."""
+
+    __tablename__ = "reconciled_quote_snapshot"
+    __table_args__ = (
+        UniqueConstraint(
+            "collection_id",
+            "symbol",
+            name="uq_reconciled_quote_snapshot_collection_symbol",
+        ),
+        Index(
+            "ix_reconciled_quote_snapshot_symbol_state",
+            "symbol",
+            "quality_state",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    collection_id: Mapped[str] = mapped_column(
+        ForeignKey("market_collection_run.id", ondelete="CASCADE"), nullable=False
+    )
+    symbol: Mapped[str] = mapped_column(String(9), nullable=False)
+    exchange: Mapped[Exchange] = mapped_column(
+        SAEnum(
+            Exchange,
+            native_enum=False,
+            values_callable=lambda enum_type: [member.value for member in enum_type],
+            length=10,
+        ),
+        nullable=False,
+    )
+    quality_state: Mapped[DataQualityState] = mapped_column(
+        SAEnum(
+            DataQualityState,
+            native_enum=False,
+            values_callable=lambda enum_type: [member.value for member in enum_type],
+            length=20,
+        ),
+        nullable=False,
+    )
+    selected_provider: Mapped[QuoteProvider | None] = mapped_column(
+        SAEnum(
+            QuoteProvider,
+            native_enum=False,
+            values_callable=lambda enum_type: [member.value for member in enum_type],
+            length=20,
+        ),
+        nullable=True,
+    )
+    comparisons: Mapped[list[dict[str, Any]]] = mapped_column(JSON(), nullable=False)
+    reasons: Mapped[list[str]] = mapped_column(JSON(), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)

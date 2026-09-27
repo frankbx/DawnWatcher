@@ -38,6 +38,16 @@ class Settings(BaseSettings):
     data_dir: Path = Path("data")
     database_filename: str = "dawnwatcher.sqlite3"
     sqlite_busy_timeout_ms: int = Field(default=5_000, ge=100, le=60_000)
+    market_request_timeout_seconds: float = Field(default=8.0, ge=1.0, le=30.0)
+    market_batch_size: int = Field(default=50, ge=1, le=100)
+    market_poll_interval_seconds: float = Field(default=15.0, ge=1.0, le=3_600.0)
+    tushare_token_file: Path = Path("token")
+    tushare_api_url: str = "https://api.tushare.pro"
+    trading_calendar_exchange: Literal["SSE"] = "SSE"
+    trading_calendar_refresh_hours: int = Field(default=24, ge=1, le=168)
+    circuit_failure_threshold: int = Field(default=3, ge=1, le=20)
+    circuit_cooldown_seconds: float = Field(default=60.0, ge=1.0, le=3_600.0)
+    archive_raw_quotes: bool = True
 
     @field_validator("timezone")
     @classmethod
@@ -87,4 +97,14 @@ class Settings(BaseSettings):
             "data_dir": str(self.data_dir),
             "database_path": str(self.database_path),
             "sqlite_busy_timeout_ms": str(self.sqlite_busy_timeout_ms),
+            "market_request_timeout_seconds": str(self.market_request_timeout_seconds),
+            "market_batch_size": str(self.market_batch_size),
+            "market_poll_interval_seconds": str(self.market_poll_interval_seconds),
+            "tushare_token_file": str(self.tushare_token_file),
+            "tushare_api_url": self.tushare_api_url,
+            "trading_calendar_exchange": self.trading_calendar_exchange,
+            "trading_calendar_refresh_hours": str(self.trading_calendar_refresh_hours),
+            "circuit_failure_threshold": str(self.circuit_failure_threshold),
+            "circuit_cooldown_seconds": str(self.circuit_cooldown_seconds),
+            "archive_raw_quotes": str(self.archive_raw_quotes),
         }
