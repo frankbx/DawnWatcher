@@ -6,7 +6,7 @@ import json
 import logging
 import sys
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, TextIO, cast
 
 from dawnwatcher.config import LogLevel
 
@@ -58,9 +58,19 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(event, ensure_ascii=False, default=str, separators=(",", ":"))
 
 
+class _CurrentStdout:
+    """Resolve stdout at write time so test capture and service redirection remain safe."""
+
+    def write(self, message: str) -> int:
+        return sys.stdout.write(message)
+
+    def flush(self) -> None:
+        sys.stdout.flush()
+
+
 def configure_logging(level: LogLevel = "INFO") -> None:
     """Configure the root logger for deterministic structured output."""
-    handler = logging.StreamHandler(sys.stdout)
+    handler = logging.StreamHandler(cast(TextIO, _CurrentStdout()))
     handler.setFormatter(JsonFormatter())
 
     root = logging.getLogger()

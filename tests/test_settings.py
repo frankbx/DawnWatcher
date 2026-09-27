@@ -23,6 +23,11 @@ def test_invalid_timezone_is_rejected() -> None:
         Settings(timezone="Mars/Olympus", _env_file=None)
 
 
+def test_database_filename_cannot_escape_managed_directory() -> None:
+    with pytest.raises(ValidationError, match="plain filename"):
+        Settings(database_filename="../outside.sqlite3", _env_file=None)
+
+
 def test_runtime_directories_are_scoped_to_data_dir(tmp_path: Path) -> None:
     settings = Settings(data_dir=tmp_path, _env_file=None)
 

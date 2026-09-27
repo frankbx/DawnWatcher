@@ -9,8 +9,10 @@ description = "Reliable intraday monitoring and post-close review workflows for 
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "alembic>=1.14,<2",
     "pydantic>=2.10,<3",
     "pydantic-settings>=2.7,<3",
+    "sqlalchemy>=2.0.36,<3",
 ]
 
 [project.optional-dependencies]
@@ -61,4 +63,3 @@ source = ["dawnwatcher"]
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
-

@@ -4,8 +4,10 @@ DawnWatcher is a deterministic, auditable trading-assistance platform. It will c
 dual-source intraday market monitoring, post-close data workflows, Feishu notifications,
 and narrowly scoped language-model agents.
 
-The project is currently at **Phase 0: engineering foundation**. Market data, strategies,
-database persistence, notifications, and agents will be implemented in later phases.
+The project is currently at **Phase 1: durable local foundation**. It includes an
+Alembic-managed SQLite schema, workflow job states, a transactional notification outbox,
+append-only audit events, crash recovery, and verified online backups. Market data,
+strategies, external notification delivery, and agents will be implemented in later phases.
 
 ## Requirements
 
@@ -29,6 +31,10 @@ development.
 dawnwatcher --help
 dawnwatcher doctor
 dawnwatcher config
+dawnwatcher db upgrade
+dawnwatcher db check
+dawnwatcher db recover
+dawnwatcher db backup
 ```
 
 ## Quality checks
@@ -42,3 +48,6 @@ pytest
 
 Runtime files belong under `data/` and are intentionally excluded from version control.
 
+SQLite runs in WAL mode with full synchronous durability, foreign-key enforcement, a busy
+timeout, and Alembic-managed migrations. Do not place the database on a network filesystem.
+Backup destinations are immutable: an existing backup file will never be overwritten.
