@@ -1,4 +1,4 @@
-"""End-to-end dual-provider collection, archive replay, and persistence tests."""
+"""End-to-end Tencent collection, archive replay, and persistence tests."""
 
 from __future__ import annotations
 
@@ -20,10 +20,10 @@ from dawnwatcher.storage.models import (
     ProviderQuoteSnapshot,
     ReconciledQuoteSnapshot,
 )
-from tests.quote_samples import sina_line, tencent_line
+from tests.quote_samples import tencent_line
 
 
-def test_dual_collection_archives_replays_and_persists(
+def test_tencent_collection_archives_replays_and_persists(
     tmp_path: Path,
     session_factory_fixture: sessionmaker[Session],
 ) -> None:
@@ -43,16 +43,13 @@ def test_dual_collection_archives_replays_and_persists(
 
     result = asyncio.run(exercise())
 
+    assert result.provider is QuoteProvider.TENCENT
     assert result.reconciled["600000.SH"].state is DataQualityState.COMPLETE
-    assert len(result.request_start_skew_ms) == 1
-    assert result.request_start_skew_ms[0] < 50
-    assert len(result.providers[QuoteProvider.SINA].archives) == 1
-    assert len(result.providers[QuoteProvider.TENCENT].archives) == 1
-    for provider_result in result.providers.values():
-        archive_path = Path(provider_result.archives[0].path)
-        assert archive_path.is_file()
-        replayed = replay_archive(archive_path, expected_trade_date=date(2026, 9, 24))
-        assert set(replayed.valid_quotes) == {"600000.SH"}
+    assert len(result.provider_result.archives) == 1
+    archive_path = Path(result.provider_result.archives[0].path)
+    assert archive_path.is_file()
+    replayed = replay_archive(archive_path, expected_trade_date=date(2026, 9, 24))
+    assert set(replayed.valid_quotes) == {"600000.SH"}
 
     with session_factory_fixture.begin() as session:
         first = persist_market_collection(session, result)
@@ -67,7 +64,7 @@ def test_dual_collection_archives_replays_and_persists(
     assert first.requested_symbols == ["600000.SH"]
     assert first.market_phase is MarketPhase.MORNING_CONTINUOUS
     assert collection_count == 1
-    assert provider_count == 2
+    assert provider_count == 1
     assert reconciled_count == 1
     assert provider_symbols == {"600000.SH"}
     assert reconciled_symbols == {"600000.SH"}
@@ -79,10 +76,7 @@ def test_one_batch_supports_fifty_symbols(tmp_path: Path) -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         provider_codes = str(request.url).split("=", maxsplit=1)[1].split(",")
-        if request.url.host == "hq.sinajs.cn":
-            body = "\n".join(sina_line(code) for code in provider_codes).encode("gb18030")
-        else:
-            body = "\n".join(tencent_line(code) for code in provider_codes).encode("gb18030")
+        body = "\n".join(tencent_line(code) for code in provider_codes).encode("gb18030")
         return httpx.Response(200, content=body)
 
     async def exercise():
@@ -96,23 +90,19 @@ def test_one_batch_supports_fifty_symbols(tmp_path: Path) -> None:
 
     result = asyncio.run(exercise())
 
-    assert len(result.providers[QuoteProvider.SINA].valid_quotes) == 50
-    assert len(result.providers[QuoteProvider.TENCENT].valid_quotes) == 50
+    assert len(result.provider_result.valid_quotes) == 50
     assert all(item.state is DataQualityState.COMPLETE for item in result.reconciled.values())
 
 
-def test_each_provider_batch_starts_together_after_slow_response(tmp_path: Path) -> None:
+def test_collection_uses_one_tencent_request_per_batch(tmp_path: Path) -> None:
     settings = Settings(data_dir=tmp_path, market_batch_size=1, _env_file=None)
+    request_urls: list[str] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
+        request_urls.append(str(request.url))
         provider_code = str(request.url).split("=", maxsplit=1)[1]
-        if request.url.host == "hq.sinajs.cn":
-            if provider_code == "sh600000":
-                await asyncio.sleep(0.1)
-            body = sina_line(provider_code).encode("gb18030")
-        else:
-            body = tencent_line(provider_code).encode("gb18030")
-        return httpx.Response(200, content=body)
+        await asyncio.sleep(0.01)
+        return httpx.Response(200, content=tencent_line(provider_code).encode("gb18030"))
 
     async def exercise():
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
@@ -125,47 +115,17 @@ def test_each_provider_batch_starts_together_after_slow_response(tmp_path: Path)
 
     result = asyncio.run(exercise())
 
-    assert len(result.request_start_skew_ms) == 2
-    assert max(result.request_start_skew_ms) < 50
+    assert len(request_urls) == 2
+    assert all(url.startswith("https://qt.gtimg.cn/q=") for url in request_urls)
+    assert result.provider_result.provider is QuoteProvider.TENCENT
     assert all(item.state is DataQualityState.COMPLETE for item in result.reconciled.values())
 
 
-def test_provider_failure_releases_other_provider_from_start_barrier(tmp_path: Path) -> None:
-    settings = Settings(data_dir=tmp_path, market_batch_size=1, _env_file=None)
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        provider_code = str(request.url).split("=", maxsplit=1)[1]
-        if request.url.host == "hq.sinajs.cn":
-            return httpx.Response(500)
-        return httpx.Response(200, content=tencent_line(provider_code).encode("gb18030"))
-
-    async def exercise():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            collector = MarketDataCollector(settings, client=client)
-            return await asyncio.wait_for(
-                collector.collect(
-                    parse_symbols(["600000.SH", "600001.SH"]),
-                    expected_trade_date=date(2026, 9, 24),
-                    archive_raw=False,
-                ),
-                timeout=1,
-            )
-
-    result = asyncio.run(exercise())
-
-    assert result.providers[QuoteProvider.SINA].valid_quotes == {}
-    assert len(result.providers[QuoteProvider.TENCENT].valid_quotes) == 2
-    assert all(item.state is DataQualityState.DEGRADED for item in result.reconciled.values())
-
-
-def test_collection_reports_circuit_open_and_suppressed_events(tmp_path: Path) -> None:
+def test_tencent_failure_opens_and_suppresses_circuit(tmp_path: Path) -> None:
     settings = Settings(data_dir=tmp_path, circuit_failure_threshold=1, _env_file=None)
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.host == "hq.sinajs.cn":
-            return httpx.Response(500)
-        provider_code = str(request.url).split("=", maxsplit=1)[1]
-        return httpx.Response(200, content=tencent_line(provider_code).encode("gb18030"))
+        return httpx.Response(500)
 
     async def exercise():
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
@@ -176,14 +136,14 @@ def test_collection_reports_circuit_open_and_suppressed_events(tmp_path: Path) -
             return first, second
 
     first, second = asyncio.run(exercise())
-    first_codes = {item.code for item in first.providers[QuoteProvider.SINA].batch_issues}
-    second_codes = {item.code for item in second.providers[QuoteProvider.SINA].batch_issues}
+    first_codes = {item.code for item in first.provider_result.batch_issues}
+    second_codes = {item.code for item in second.provider_result.batch_issues}
 
     assert "circuit_opened" in first_codes
     assert "circuit_open" in second_codes
+    assert second.reconciled["600000.SH"].state is DataQualityState.BLOCKED
 
 
 def _single_symbol_handler(request: httpx.Request) -> httpx.Response:
-    if request.url.host == "hq.sinajs.cn":
-        return httpx.Response(200, content=sina_line().encode("gb18030"))
-    return httpx.Response(200, content=tencent_line().encode("gb18030"))
+    provider_code = str(request.url).split("=", maxsplit=1)[1]
+    return httpx.Response(200, content=tencent_line(provider_code).encode("gb18030"))

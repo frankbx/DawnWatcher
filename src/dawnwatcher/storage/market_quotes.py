@@ -1,4 +1,4 @@
-"""Atomic persistence of dual-provider collection results."""
+"""Atomic persistence of single-provider collection results."""
 
 from __future__ import annotations
 
@@ -39,44 +39,41 @@ def persist_market_collection(
         requested_symbols=[symbol.ts_code for symbol in result.requested_symbols],
         started_at=result.started_at,
         finished_at=result.finished_at,
-        provider_summaries={
-            provider.value: provider_result.to_summary()
-            for provider, provider_result in result.providers.items()
-        },
+        provider_summaries={result.provider.value: result.provider_result.to_summary()},
         quality_counts=quality_counts,
     )
     session.add(collection)
     session.flush()
 
-    for provider_result in result.providers.values():
-        for symbol, quote in provider_result.quotes.items():
-            session.add(
-                ProviderQuoteSnapshot(
-                    collection_id=collection.id,
-                    provider=quote.provider,
-                    symbol=symbol,
-                    exchange=quote.symbol.exchange,
-                    name=quote.name,
-                    quote_at=quote.quote_at,
-                    fetched_at=quote.fetched_at,
-                    open=quote.open,
-                    previous_close=quote.previous_close,
-                    latest=quote.latest,
-                    high=quote.high,
-                    low=quote.low,
-                    volume_shares=quote.volume_shares,
-                    amount_cny=quote.amount_cny,
-                    bid1_price=quote.bid1_price,
-                    bid1_volume_shares=quote.bid1_volume_shares,
-                    ask1_price=quote.ask1_price,
-                    ask1_volume_shares=quote.ask1_volume_shares,
-                    volume_precision_shares=quote.volume_precision_shares,
-                    raw_field_count=quote.raw_field_count,
-                    validation_issues=[
-                        issue.to_dict() for issue in provider_result.quote_issues.get(symbol, ())
-                    ],
-                )
+    provider_result = result.provider_result
+    for symbol, quote in provider_result.quotes.items():
+        session.add(
+            ProviderQuoteSnapshot(
+                collection_id=collection.id,
+                provider=quote.provider,
+                symbol=symbol,
+                exchange=quote.symbol.exchange,
+                name=quote.name,
+                quote_at=quote.quote_at,
+                fetched_at=quote.fetched_at,
+                open=quote.open,
+                previous_close=quote.previous_close,
+                latest=quote.latest,
+                high=quote.high,
+                low=quote.low,
+                volume_shares=quote.volume_shares,
+                amount_cny=quote.amount_cny,
+                bid1_price=quote.bid1_price,
+                bid1_volume_shares=quote.bid1_volume_shares,
+                ask1_price=quote.ask1_price,
+                ask1_volume_shares=quote.ask1_volume_shares,
+                volume_precision_shares=quote.volume_precision_shares,
+                raw_field_count=quote.raw_field_count,
+                validation_issues=[
+                    issue.to_dict() for issue in provider_result.quote_issues.get(symbol, ())
+                ],
             )
+        )
 
     for symbol, reconciled in result.reconciled.items():
         session.add(
@@ -86,7 +83,7 @@ def persist_market_collection(
                 exchange=reconciled.symbol.exchange,
                 quality_state=reconciled.state,
                 selected_provider=reconciled.selected_provider,
-                comparisons=[item.to_dict() for item in reconciled.comparisons],
+                comparisons=list(reconciled.comparisons),
                 reasons=list(reconciled.reasons),
             )
         )

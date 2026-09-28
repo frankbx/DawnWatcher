@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from dawnwatcher import __version__
 from dawnwatcher.config import Settings
+from dawnwatcher.diagnostics.comparison import DiagnosticComparisonRunner
 from dawnwatcher.domain.quotes import MarketCollectionResult
 from dawnwatcher.logging import configure_logging
 from dawnwatcher.market import MarketPhase, MarketSessionStatus
@@ -107,9 +108,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     quote_parser = subparsers.add_parser("quotes", help="Collect or replay market quotes.")
     quote_commands = quote_parser.add_subparsers(dest="quote_command", required=True)
-    collect_parser = quote_commands.add_parser(
-        "collect", help="Collect one concurrent Sina/Tencent snapshot."
-    )
+    collect_parser = quote_commands.add_parser("collect", help="Collect one Tencent snapshot.")
     collect_parser.add_argument(
         "symbols", nargs="+", help="Tushare ts_code values such as 600000.SH."
     )
@@ -131,7 +130,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Diagnostic override: request quotes outside an active auction phase.",
     )
     watch_parser = quote_commands.add_parser(
-        "watch", help="Continuously collect non-overlapping Sina/Tencent snapshots."
+        "watch", help="Continuously collect non-overlapping Tencent snapshots."
     )
     watch_parser.add_argument(
         "symbols", nargs="+", help="Tushare ts_code values such as 600000.SH."
@@ -159,13 +158,54 @@ def build_parser() -> argparse.ArgumentParser:
     watch_parser.add_argument(
         "--no-persist", action="store_true", help="Do not persist normalized snapshots."
     )
+    compare_parser = quote_commands.add_parser(
+        "compare", help="Diagnostic-only concurrent Sina/Tencent reliability comparison."
+    )
+    compare_parser.add_argument(
+        "symbols", nargs="+", help="Tushare ts_code values such as 600000.SH."
+    )
+    compare_parser.add_argument(
+        "--expected-date",
+        type=date.fromisoformat,
+        help="Expected quote trade date in YYYY-MM-DD form.",
+    )
+    compare_parser.add_argument(
+        "--interval",
+        "--interval-seconds",
+        dest="interval_seconds",
+        type=_poll_interval_seconds,
+        help="Seconds between synchronized requests; defaults to configured value (15).",
+    )
+    compare_parser.add_argument(
+        "--max-runs",
+        type=_positive_integer,
+        help="Stop after this many comparison cycles; omitted means run until stopped.",
+    )
+    compare_parser.add_argument(
+        "--until",
+        type=datetime.fromisoformat,
+        help="Timezone-aware ISO timestamp at which the diagnostic run stops.",
+    )
+    compare_parser.add_argument(
+        "--report-dir",
+        type=Path,
+        help="Directory for compare.jsonl and the separate inconsistencies.jsonl log.",
+    )
+    compare_parser.add_argument(
+        "--no-archive", action="store_true", help="Do not archive raw Sina/Tencent responses."
+    )
+    compare_parser.add_argument(
+        "--ignore-market-gate",
+        action="store_true",
+        help="Diagnostic override: request outside an active auction phase.",
+    )
     replay_parser = quote_commands.add_parser(
         "replay", help="Parse and validate one archived provider response."
     )
     replay_parser.add_argument("archive", type=Path)
     replay_parser.add_argument("--expected-date", type=date.fromisoformat)
     stats_parser = quote_commands.add_parser(
-        "stats", help="Summarize dual-source reliability for one local trading date."
+        "stats", help="Summarize Tencent reliability for one local trading date."
     )
     stats_parser.add_argument(
         "--date",
@@ -402,6 +442,38 @@ def _run_quote_command(settings: Settings, args: argparse.Namespace) -> int:
         )
         return 0 if schedule.failed_runs == 0 else 1
 
+    if args.quote_command == "compare":
+        interval_seconds = args.interval_seconds or settings.market_poll_interval_seconds
+        try:
+            schedule, summary = asyncio.run(
+                _compare_quotes(
+                    settings,
+                    args.symbols,
+                    expected_trade_date=args.expected_date,
+                    interval_seconds=interval_seconds,
+                    max_runs=args.max_runs,
+                    until=args.until,
+                    report_directory=args.report_dir,
+                    archive_raw=not args.no_archive,
+                    ignore_market_gate=args.ignore_market_gate,
+                )
+            )
+        except KeyboardInterrupt:
+            return 130
+        print(
+            json.dumps(
+                {
+                    "event": "market.source_comparison.stopped",
+                    **schedule.to_dict(),
+                    "summary": summary,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            flush=True,
+        )
+        return 0 if schedule.failed_runs == 0 else 1
+
     raise ValueError(f"unsupported quote command: {args.quote_command}")
 
 
@@ -613,6 +685,147 @@ async def _watch_quotes(
         engine.dispose()
         for registered_signal in registered_signals:
             loop.remove_signal_handler(registered_signal)
+
+
+async def _compare_quotes(
+    settings: Settings,
+    symbol_values: list[str],
+    *,
+    expected_trade_date: date | None,
+    interval_seconds: float,
+    max_runs: int | None,
+    until: datetime | None,
+    report_directory: Path | None,
+    archive_raw: bool,
+    ignore_market_gate: bool,
+) -> tuple[IntervalScheduleResult, dict[str, object]]:
+    """Run the isolated Sina/Tencent diagnostic comparison on a fixed cadence."""
+    symbols = parse_symbols(symbol_values)
+    if until is not None and (until.tzinfo is None or until.utcoffset() is None):
+        raise ValueError("--until must include a timezone offset")
+
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    registered_signals: list[signal.Signals] = []
+    for watched_signal in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(watched_signal, stop_event.set)
+        except (NotImplementedError, RuntimeError):
+            continue
+        registered_signals.append(watched_signal)
+
+    engine = create_database_engine(settings)
+    session_factory = create_session_factory(engine)
+    gate = _build_trading_session_gate(settings, session_factory)
+    initial_status: MarketSessionStatus | None = None
+    if not ignore_market_gate:
+        initial_status = await gate.status_at(datetime.now(UTC))
+        if expected_trade_date is None and initial_status.trade_date is not None:
+            expected_trade_date = initial_status.trade_date
+
+    async def stop_at_deadline() -> None:
+        if until is None:
+            return
+        delay = (until.astimezone(UTC) - datetime.now(UTC)).total_seconds()
+        if delay > 0:
+            await asyncio.sleep(delay)
+        stop_event.set()
+
+    deadline_task = asyncio.create_task(stop_at_deadline()) if until is not None else None
+    print(
+        json.dumps(
+            {
+                "event": "market.source_comparison.started",
+                "interval_seconds": interval_seconds,
+                "symbols": [symbol.ts_code for symbol in symbols],
+                "expected_trade_date": (
+                    expected_trade_date.isoformat() if expected_trade_date else None
+                ),
+                "until": until.isoformat() if until else None,
+                "archive_raw": archive_raw,
+                "report_directory": str(report_directory) if report_directory else None,
+                "market_gate": (
+                    initial_status.to_dict() if initial_status is not None else "ignored"
+                ),
+                "calendar_coverage": _coverage_payload(gate),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+        flush=True,
+    )
+
+    try:
+        async with DiagnosticComparisonRunner(
+            settings,
+            symbols,
+            expected_trade_date=expected_trade_date,
+            report_directory=report_directory,
+            archive_raw=archive_raw,
+        ) as runner:
+
+            async def compare_once(run_number: int) -> bool:
+                if not ignore_market_gate:
+                    status = await gate.status_at(datetime.now(UTC))
+                    if not status.collect_quotes:
+                        print(
+                            json.dumps(
+                                {
+                                    "event": "market.source_comparison.skipped",
+                                    "run_number": run_number,
+                                    **status.to_dict(),
+                                },
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            ),
+                            flush=True,
+                        )
+                        return False
+                    if expected_trade_date is None:
+                        runner.expected_trade_date = status.trade_date
+                cycle = await runner.collect_once(run_number)
+                console_cycle = {
+                    key: value for key, value in cycle.items() if key != "inconsistencies"
+                }
+                print(
+                    json.dumps(console_cycle, ensure_ascii=False, separators=(",", ":")), flush=True
+                )
+                return True
+
+            schedule = await FixedIntervalScheduler(interval_seconds).run(
+                compare_once,
+                stop_event=stop_event,
+                max_runs=max_runs,
+            )
+            summary = runner.summary.to_dict()
+            summary_payload = {
+                "event": "market.source_comparison.summary",
+                "generated_at": datetime.now(UTC).isoformat(),
+                "report_directory": str(runner.report_directory.resolve()),
+                "comparison_log": str(runner.comparison_log.resolve()),
+                "inconsistency_log": str(runner.inconsistency_log.resolve()),
+                "schedule": schedule.to_dict(),
+                "summary": summary,
+            }
+            (runner.report_directory / "summary.json").write_text(
+                json.dumps(summary_payload, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            summary = {
+                **summary,
+                "report_directory": str(runner.report_directory.resolve()),
+                "comparison_log": str(runner.comparison_log.resolve()),
+                "inconsistency_log": str(runner.inconsistency_log.resolve()),
+                "summary_file": str((runner.report_directory / "summary.json").resolve()),
+            }
+    finally:
+        if deadline_task is not None:
+            deadline_task.cancel()
+            await asyncio.gather(deadline_task, return_exceptions=True)
+        engine.dispose()
+        for registered_signal in registered_signals:
+            loop.remove_signal_handler(registered_signal)
+    return schedule, summary
 
 
 async def _monitor_once(settings: Settings, observed_at: datetime) -> dict[str, object]:

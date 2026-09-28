@@ -1,4 +1,4 @@
-"""Sina batch quote adapter."""
+"""Sina quote parser used only by the opt-in source comparison diagnostic."""
 
 from __future__ import annotations
 
@@ -20,8 +20,8 @@ _SHANGHAI = ZoneInfo("Asia/Shanghai")
 _RESPONSE_PATTERN = re.compile(r'var hq_str_(?P<code>[a-z]{2}\d{6})="(?P<data>[^"]*)";')
 
 
-class SinaQuoteAdapter:
-    """Parse the compact comma-separated Sina quote protocol."""
+class DiagnosticSinaQuoteAdapter:
+    """Parse Sina's comma-separated endpoint without entering production code paths."""
 
     provider = QuoteProvider.SINA
     encoding = "gb18030"
@@ -43,7 +43,6 @@ class SinaQuoteAdapter:
         requested = {symbol.provider_code: symbol for symbol in batch.requested_symbols}
         quotes: dict[str, MarketQuote] = {}
         issues: list[QuoteIssue] = []
-
         for match in _RESPONSE_PATTERN.finditer(text):
             provider_code = match.group("code")
             symbol = requested.get(provider_code)
@@ -67,9 +66,8 @@ class SinaQuoteAdapter:
                     )
                 )
                 continue
-            fields = data.split(",")
             try:
-                quotes[symbol.ts_code] = self._parse_fields(symbol, fields, batch)
+                quotes[symbol.ts_code] = self._parse_fields(symbol, data.split(","), batch)
             except (QuoteParseError, ValueError, IndexError) as exc:
                 issues.append(
                     QuoteIssue(

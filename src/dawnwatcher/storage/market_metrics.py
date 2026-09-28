@@ -1,9 +1,8 @@
-"""Aggregate persisted collection reliability and reconciliation metrics."""
+"""Aggregate persisted Tencent collection reliability metrics."""
 
 from __future__ import annotations
 
 import math
-from collections import Counter
 from datetime import datetime
 from statistics import fmean
 from typing import Any
@@ -11,8 +10,10 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from dawnwatcher.domain.quotes import DataQualityState, QuoteProvider
+from dawnwatcher.domain import DataQualityState
 from dawnwatcher.storage.models import MarketCollectionRun, ReconciledQuoteSnapshot
+
+_PROVIDER_KEY = "tencent"
 
 
 def build_market_metrics_report(
@@ -22,9 +23,9 @@ def build_market_metrics_report(
     end_at: datetime,
     expected_interval_seconds: float,
 ) -> dict[str, Any]:
-    """Summarize provider availability, latency, skew, conflicts, and gaps."""
+    """Summarize Tencent availability, latency, quality, and collection gaps."""
     _validate_range(start_at, end_at)
-    collections = list(
+    all_collections = list(
         session.scalars(
             select(MarketCollectionRun)
             .where(
@@ -34,6 +35,7 @@ def build_market_metrics_report(
             .order_by(MarketCollectionRun.started_at)
         )
     )
+    collections = [item for item in all_collections if _is_single_source(item)]
     collection_ids = [item.id for item in collections]
     reconciled = (
         list(
@@ -47,38 +49,21 @@ def build_market_metrics_report(
         else []
     )
 
-    provider_metrics = {
-        provider.value: _provider_metrics(collections, provider) for provider in QuoteProvider
-    }
-    skews = [skew for collection in collections for skew in _collection_skews(collection)]
-    field_states: Counter[str] = Counter()
-    conflict_fields: Counter[str] = Counter()
-    for snapshot in reconciled:
-        for comparison in snapshot.comparisons:
-            state = str(comparison.get("state", "unknown"))
-            field = str(comparison.get("field", "unknown"))
-            field_states[state] += 1
-            if state == "conflict":
-                conflict_fields[field] += 1
-
     quality_counts = {
         state.value: sum(snapshot.quality_state is state for snapshot in reconciled)
         for state in DataQualityState
     }
     gap_durations = _collection_gap_durations(collections, expected_interval_seconds)
     return {
+        "provider": _PROVIDER_KEY,
+        "single_source_mode": True,
         "start_at": start_at.isoformat(),
         "end_at": end_at.isoformat(),
         "collection_count": len(collections),
+        "total_collection_count": len(all_collections),
+        "legacy_dual_collection_count": len(all_collections) - len(collections),
         "requested_quote_count": sum(len(item.requested_symbols) for item in collections),
-        "providers": provider_metrics,
-        "request_start_skew_ms": _distribution(skews),
-        "field_comparisons": {
-            "counts": dict(sorted(field_states.items())),
-            "conflict_count": sum(conflict_fields.values()),
-            "conflicts_by_field": dict(sorted(conflict_fields.items())),
-            "conflicted_quote_count": quality_counts[DataQualityState.CONFLICTED.value],
-        },
+        "metrics": _provider_metrics(collections),
         "quality_counts": quality_counts,
         "collection_gaps": {
             "expected_interval_seconds": expected_interval_seconds,
@@ -90,10 +75,7 @@ def build_market_metrics_report(
     }
 
 
-def _provider_metrics(
-    collections: list[MarketCollectionRun],
-    provider: QuoteProvider,
-) -> dict[str, Any]:
+def _provider_metrics(collections: list[MarketCollectionRun]) -> dict[str, Any]:
     run_count = len(collections)
     successful_runs = 0
     valid_quotes = 0
@@ -106,7 +88,7 @@ def _provider_metrics(
     for collection in collections:
         requested_count = len(collection.requested_symbols)
         requested_quotes += requested_count
-        raw_summary = collection.provider_summaries.get(provider.value, {})
+        raw_summary = collection.provider_summaries.get(_PROVIDER_KEY, {})
         summary = raw_summary if isinstance(raw_summary, dict) else {}
         valid_count = _integer(summary.get("valid_quote_count"))
         valid_quotes += valid_count
@@ -143,25 +125,8 @@ def _provider_metrics(
     }
 
 
-def _collection_skews(collection: MarketCollectionRun) -> list[float]:
-    starts: list[list[datetime]] = []
-    for provider in QuoteProvider:
-        raw_summary = collection.provider_summaries.get(provider.value, {})
-        summary = raw_summary if isinstance(raw_summary, dict) else {}
-        raw_values = summary.get("request_dispatch_ready_at", [])
-        values = raw_values if isinstance(raw_values, list) else []
-        parsed = [datetime.fromisoformat(value) for value in values if isinstance(value, str)]
-        starts.append(parsed)
-    if len(starts) < 2 or any(not values for values in starts):
-        return []
-    comparable = min(len(values) for values in starts)
-    return [
-        (
-            max(values[index] for values in starts) - min(values[index] for values in starts)
-        ).total_seconds()
-        * 1_000
-        for index in range(comparable)
-    ]
+def _is_single_source(collection: MarketCollectionRun) -> bool:
+    return set(collection.provider_summaries) == {_PROVIDER_KEY}
 
 
 def _collection_gap_durations(

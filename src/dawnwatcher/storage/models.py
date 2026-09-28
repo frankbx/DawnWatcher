@@ -203,7 +203,7 @@ class AuditEvent(Base):
 
 
 class MarketCollectionRun(Base):
-    """Metadata for one idempotent dual-provider collection cycle."""
+    """Metadata for one idempotent Tencent collection cycle."""
 
     __tablename__ = "market_collection_run"
     __table_args__ = (

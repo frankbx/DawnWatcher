@@ -5,27 +5,8 @@ from __future__ import annotations
 from decimal import Decimal
 
 from dawnwatcher.domain import QuoteProvider, QuoteSymbol
-from dawnwatcher.providers.sina import SinaQuoteAdapter
 from dawnwatcher.providers.tencent import TencentQuoteAdapter
-from tests.quote_samples import raw_batch, sina_line, tencent_line
-
-
-def test_sina_parser_preserves_share_level_volume() -> None:
-    symbol = QuoteSymbol.parse("600000.SH")
-    batch = raw_batch(QuoteProvider.SINA, symbol, sina_line().encode("gb18030"))
-
-    quotes, issues = SinaQuoteAdapter().parse(batch)
-
-    assert issues == ()
-    quote = quotes["600000.SH"]
-    assert quote.name == "浦发银行"
-    assert quote.latest == Decimal("9.000")
-    assert quote.volume_shares == 52_836_397
-    assert quote.amount_cny == Decimal("475964884.000")
-    assert quote.bid1_volume_shares == 188_700
-    assert quote.ask1_volume_shares == 105_300
-    assert quote.volume_precision_shares == 1
-    assert quote.raw_field_count == 34
+from tests.quote_samples import raw_batch, tencent_line
 
 
 def test_tencent_parser_normalizes_lots_to_shares() -> None:

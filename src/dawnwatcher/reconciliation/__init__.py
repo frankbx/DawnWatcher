@@ -1,1 +1,1 @@
-"""Cross-provider normalization and reconciliation."""
+"""Provider-independent quote validation."""

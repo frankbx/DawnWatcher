@@ -13,7 +13,7 @@ def validate_quote(
     *,
     expected_trade_date: date | None = None,
 ) -> tuple[QuoteIssue, ...]:
-    """Validate invariants required before a quote can enter reconciliation."""
+    """Validate invariants required before a quote can enter monitoring."""
     issues: list[QuoteIssue] = []
     symbol = quote.symbol.ts_code
 

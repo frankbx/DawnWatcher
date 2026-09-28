@@ -1,22 +1,24 @@
 # DawnWatcher
 
 DawnWatcher is a deterministic, auditable trading-assistance platform. It will combine
-dual-source intraday market monitoring, post-close data workflows, Feishu notifications,
-and narrowly scoped language-model agents.
+Tencent intraday market monitoring, post-close data workflows, Feishu notifications, and
+narrowly scoped language-model agents.
 
-The project is currently at **Phase 2: dual-source market data foundation**. In addition to
-the durable Phase 1 foundation, it can collect A-share snapshots from Sina and Tencent in
-parallel, normalize and validate both sources independently, reconcile important fields,
-archive the exact raw responses, replay archives offline, and persist auditable snapshots in
-SQLite. It also provides non-overlapping fixed-interval collection for unattended operation.
-Tushare `trade_cal` is cached in SQLite and gates all live collection by trading day and
-auction phase. Strategies, external notification delivery, and agents will be implemented in
-later phases.
+The project is currently at **Phase 2: single-source market data foundation**. In addition to
+the durable Phase 1 foundation, it collects A-share snapshots from Tencent, validates them,
+archives the exact raw responses, replays archives offline, and persists auditable snapshots
+in SQLite. It also provides non-overlapping fixed-interval collection for unattended
+operation. Tushare `trade_cal` is cached in SQLite and gates all live collection by trading
+day and auction phase. Strategies, external notification delivery, and agents will be
+implemented in later phases.
 
-Phase 2 deliberately keeps provider records separate. It never creates a synthetic quote by
-mixing fields from Sina and Tencent. A reconciled record instead selects one complete source,
-retains field-by-field comparisons, and assigns one of these quality states: `complete`,
-`near`, `degraded`, `conflicted`, `stale`, or `blocked`.
+The active collector intentionally uses Tencent only. Historical Sina/Tencent rows remain
+readable in SQLite for audit purposes, but new collections do not request Sina, perform
+cross-provider reconciliation, or generate source-conflict metrics.
+
+An opt-in diagnostic command can still compare Sina and Tencent concurrently. It is isolated
+from the production collector and is intended for time-bounded provider reliability tests;
+it does not write market snapshots to the production tables.
 
 ## Requirements
 
@@ -52,8 +54,10 @@ dawnwatcher calendar status
 dawnwatcher quotes collect 600000.SH 000001.SZ
 dawnwatcher quotes watch 600000.SH 000001.SZ
 dawnwatcher quotes watch 600000.SH 000001.SZ --interval 30 --max-runs 10
+dawnwatcher quotes compare 600000.SH 000001.SZ --interval 15 \
+  --until 2026-09-28T15:00:00+08:00
 dawnwatcher quotes stats --date 2026-09-28
-dawnwatcher quotes replay data/raw/quotes/YYYY-MM-DD/sina/example.json.gz \
+dawnwatcher quotes replay data/raw/quotes/YYYY-MM-DD/tencent/example.json.gz \
   --expected-date 2026-09-24
 dawnwatcher monitor check
 dawnwatcher monitor watch
@@ -64,8 +68,8 @@ upserts all natural dates into SQLite. Explicit `--start-date` and `--end-date` 
 supported. Runtime gates use the local cache and refresh it at most once every 24 hours; a
 failed refresh retains known cached dates, while an unknown date fails closed.
 
-`quotes collect` is market-gated by default, archives raw responses, and persists normalized
-and reconciled records. `--ignore-market-gate` is an explicit diagnostic override. Use a
+`quotes collect` is market-gated by default, archives raw Tencent responses, and persists
+normalized records. `--ignore-market-gate` is an explicit diagnostic override. Use a
 stable `--idempotency-key` when a scheduler may retry the same logical run. For diagnostics,
 `--no-persist` and `--no-archive` can disable either side effect. Security identifiers are
 normalized to uppercase Tushare `ts_code` values such as `600000.SH`,
@@ -80,8 +84,20 @@ Runs never overlap: if collection exceeds the interval, elapsed schedule slots a
 The process handles SIGINT and SIGTERM cleanly. `--max-runs` is useful for bounded smoke tests;
 without it, the process continues until a stop signal arrives.
 
-Both `quotes collect` and `quotes watch` call Sina and Tencent only during active auction
-phases on dates marked open by Tushare:
+`quotes compare` is the separate Sina/Tencent diagnostic path. Both requests are dispatched
+concurrently on each cadence and each source has its own timeout and circuit breaker. The
+default interval is also 15 seconds. `--until` accepts a timezone-aware ISO timestamp, which
+is convenient for an afternoon test ending at 15:00; `--max-runs` can be used for a bounded
+smoke test. Raw responses are archived under `data/raw/quotes/YYYY-MM-DD/{sina,tencent}`.
+Each run is appended to `data/reports/afternoon-stability-YYYY-MM-DD/compare.jsonl`, while
+every `near`, `conflict`, `degraded`, `stale`, or `blocked` result is appended as an independent
+JSON record to `inconsistencies.jsonl`. Critical price tolerances retain the earlier definition:
+exact match is `<= max(0.01, reference * 0.0002)`, near is `<= max(0.03, reference * 0.0005)`,
+and larger differences are conflicts. The diagnostic path is deliberately not used by the
+Tencent-only production watcher.
+
+Both `quotes collect` and `quotes watch` call Tencent only during active auction phases on
+dates marked open by Tushare:
 
 - 09:15:00 ≤ t ≤ 09:25:00: `opening_call_auction`
 - 09:25:00 < t < 09:30:00: `opening_pause` (no collection)
@@ -93,27 +109,17 @@ phases on dates marked open by Tushare:
 If a scheduler tick lands exactly at 09:25, 11:30, or 15:00, it remains part of the preceding
 active phase. Collections persist `market_phase` and expose `auction_mode` so call-auction
 snapshots cannot be mistaken for continuous-auction observations. Non-trading ticks are
-reported as scheduler skips and generate no Sina/Tencent HTTP traffic.
+reported as scheduler skips and generate no Tencent HTTP traffic.
 
-Within every collection cycle, corresponding Sina and Tencent batches use a two-stage start
-barrier. Both sides first prepare their request, record dispatch readiness, and reach the final
-barrier before either side may enter the HTTP stack. This also prevents a fast provider from
-starting the next batch while the other provider is still processing the previous one. Each
-result reports `request_dispatch_ready_at`, `request_start_skew_ms`, and
-`max_request_start_skew_ms` so application-level launch alignment remains observable. A failed
-or circuit-open provider leaves the barrier immediately and cannot block the healthy provider.
+The collector uses bounded request timeouts, batches of at most 50 symbols by default, and an
+in-process Tencent circuit breaker. There are no aggressive automatic HTTP retries. A valid
+Tencent quote is `complete`; missing, stale, or invalid values are blocked from downstream
+strategy code.
 
-The collectors use bounded request timeouts, batches of at most 50 symbols by default, and
-an in-process circuit breaker per provider. There are no aggressive automatic HTTP retries.
-If one provider is unavailable, a valid quote from the other remains usable but is marked
-`degraded`; strategy code in later phases must make an explicit decision about whether that
-quality is acceptable.
-
-`quotes stats` reports each provider's complete-run success rate, valid-quote coverage,
-average/p50/p95/max collection latency, circuit-open and circuit-suppression counts. It also
-reports dual-source request-start skew, per-field reconciliation conflicts, quality-state
-counts, and within-session collection gaps. Statistics are computed from persisted collection
-records for one Asia/Shanghai calendar date.
+`quotes stats` reports Tencent's complete-run success rate, valid-quote coverage,
+average/p50/p95/max collection latency, circuit-open and circuit-suppression counts,
+quality-state counts, and within-session collection gaps. Historical dual-source rows are
+reported separately and do not contaminate current single-source metrics.
 
 `quotes watch` writes a durable heartbeat on every scheduler tick and after every collection.
 Run `monitor watch` as a separate supervised process so a dead or stalled quote watcher can be

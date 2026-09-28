@@ -65,7 +65,7 @@ def test_tushare_migration_rewrites_existing_symbols(tmp_path: Path) -> None:
             {
                 "id": "provider-1",
                 "collection_id": "collection-1",
-                "provider": "sina",
+                "provider": "tencent",
                 "symbol": "600000",
                 "exchange": "sse",
                 "name": "浦发银行",
@@ -92,7 +92,7 @@ def test_tushare_migration_rewrites_existing_symbols(tmp_path: Path) -> None:
                 "symbol": "600000",
                 "exchange": "sse",
                 "quality_state": "complete",
-                "selected_provider": "sina",
+                "selected_provider": "tencent",
                 "comparisons": [],
                 "reasons": [],
                 "created_at": now,

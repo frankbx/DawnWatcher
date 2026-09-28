@@ -12,10 +12,10 @@ from dawnwatcher.market import MarketPhase
 
 
 class QuoteProvider(StrEnum):
-    """Supported free real-time quote providers."""
+    """Quote providers, with Sina retained only to read historical rows."""
 
-    SINA = "sina"
     TENCENT = "tencent"
+    SINA = "sina"
 
 
 class Exchange(StrEnum):
@@ -27,7 +27,7 @@ class Exchange(StrEnum):
 
 
 class DataQualityState(StrEnum):
-    """Decision-facing state after validation and reconciliation."""
+    """Decision-facing state after validation; legacy states remain queryable."""
 
     COMPLETE = "complete"
     NEAR = "near"
@@ -42,15 +42,6 @@ class IssueSeverity(StrEnum):
 
     WARNING = "warning"
     ERROR = "error"
-
-
-class ComparisonState(StrEnum):
-    """Agreement level for one normalized field."""
-
-    MATCH = "match"
-    NEAR = "near"
-    CONFLICT = "conflict"
-    INFORMATIONAL = "informational"
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,7 +99,7 @@ class QuoteSymbol:
 
     @property
     def provider_code(self) -> str:
-        """Return the common provider prefix used by Sina and Tencent."""
+        """Return the Tencent security code used by the quote endpoint."""
         prefix = {
             Exchange.SSE: "sh",
             Exchange.SZSE: "sz",
@@ -266,34 +257,14 @@ class ProviderCollectionResult:
 
 
 @dataclass(frozen=True, slots=True)
-class FieldComparison:
-    """Comparison of one normalized value across two providers."""
-
-    field: str
-    state: ComparisonState
-    sina_value: str
-    tencent_value: str
-    absolute_difference: str
-
-    def to_dict(self) -> dict[str, str]:
-        return {
-            "field": self.field,
-            "state": self.state.value,
-            "sina_value": self.sina_value,
-            "tencent_value": self.tencent_value,
-            "absolute_difference": self.absolute_difference,
-        }
-
-
-@dataclass(frozen=True, slots=True)
 class ReconciledQuote:
-    """Decision-facing quote quality result without cross-provider field mixing."""
+    """Decision-facing quote quality result for the Tencent snapshot."""
 
     symbol: QuoteSymbol
     state: DataQualityState
     selected_provider: QuoteProvider | None
     selected_quote: MarketQuote | None
-    comparisons: tuple[FieldComparison, ...] = ()
+    comparisons: tuple[dict[str, Any], ...] = ()
     reasons: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
@@ -307,14 +278,14 @@ class ReconciledQuote:
             "selected_quote": (
                 self.selected_quote.to_dict() if self.selected_quote is not None else None
             ),
-            "comparisons": [comparison.to_dict() for comparison in self.comparisons],
+            "comparisons": list(self.comparisons),
             "reasons": list(self.reasons),
         }
 
 
 @dataclass(frozen=True, slots=True)
 class MarketCollectionResult:
-    """Complete output of one dual-provider collection cycle."""
+    """Complete output of one Tencent collection cycle."""
 
     collection_id: str
     idempotency_key: str
@@ -322,25 +293,14 @@ class MarketCollectionResult:
     expected_trade_date: date | None
     started_at: datetime
     finished_at: datetime
-    providers: dict[QuoteProvider, ProviderCollectionResult]
+    provider_result: ProviderCollectionResult
     reconciled: dict[str, ReconciledQuote]
     market_phase: MarketPhase | None = None
 
     @property
-    def request_start_skew_ms(self) -> tuple[float, ...]:
-        """Return the local launch-time skew for every dual-provider batch."""
-        provider_starts = [result.request_dispatch_ready_at for result in self.providers.values()]
-        if len(provider_starts) < 2:
-            return ()
-        comparable_batches = min(len(values) for values in provider_starts)
-        return tuple(
-            (
-                max(values[index] for values in provider_starts)
-                - min(values[index] for values in provider_starts)
-            ).total_seconds()
-            * 1_000
-            for index in range(comparable_batches)
-        )
+    def provider(self) -> QuoteProvider:
+        """Return the active market-data provider."""
+        return self.provider_result.provider
 
     def to_dict(self, *, include_quotes: bool = True) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -358,13 +318,7 @@ class MarketCollectionResult:
             "auction_mode": (
                 self.market_phase.auction_mode.value if self.market_phase is not None else None
             ),
-            "providers": {
-                provider.value: result.to_summary() for provider, result in self.providers.items()
-            },
-            "request_start_skew_ms": [round(value, 3) for value in self.request_start_skew_ms],
-            "max_request_start_skew_ms": (
-                round(max(self.request_start_skew_ms), 3) if self.request_start_skew_ms else None
-            ),
+            "provider": self.provider_result.to_summary(),
             "quality_counts": {
                 state.value: sum(item.state is state for item in self.reconciled.values())
                 for state in DataQualityState

@@ -8,53 +8,6 @@ from dawnwatcher.domain import QuoteProvider, QuoteSymbol
 from dawnwatcher.domain.quotes import RawQuoteBatch
 
 
-def sina_line(
-    provider_code: str = "sh600000",
-    *,
-    name: str = "浦发银行",
-    quote_date: str = "2026-09-24",
-    quote_time: str = "10:00:00",
-    latest: str = "9.000",
-) -> str:
-    fields = [
-        name,
-        "8.990",
-        "8.980",
-        latest,
-        "9.050",
-        "8.970",
-        "9.000",
-        "9.010",
-        "52836397",
-        "475964884.000",
-        "188700",
-        "9.000",
-        "411700",
-        "8.990",
-        "291600",
-        "8.980",
-        "500100",
-        "8.970",
-        "590400",
-        "8.960",
-        "105300",
-        "9.010",
-        "816161",
-        "9.020",
-        "1653700",
-        "9.030",
-        "934515",
-        "9.040",
-        "1796900",
-        "9.050",
-        quote_date,
-        quote_time,
-        "00",
-        "",
-    ]
-    return f'var hq_str_{provider_code}="{",".join(fields)}";'
-
-
 def tencent_line(
     provider_code: str = "sh600000",
     *,
