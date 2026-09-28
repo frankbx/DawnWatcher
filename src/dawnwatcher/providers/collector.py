@@ -204,7 +204,7 @@ class MarketDataCollector:
                 for symbol in quotes
             )
             if not quotes:
-                breaker.record_failure()
+                _record_breaker_failure(breaker, batch_issues)
             else:
                 breaker.record_success()
             if valid_count == 0:
@@ -216,7 +216,7 @@ class MarketDataCollector:
                     )
                 )
         except (httpx.HTTPError, UnicodeError, ValueError, OSError) as exc:
-            breaker.record_failure()
+            _record_breaker_failure(breaker, batch_issues)
             batch_issues.append(
                 QuoteIssue(
                     code="provider_failure",
@@ -316,3 +316,19 @@ def _deduplicate_symbols(symbols: tuple[QuoteSymbol, ...]) -> tuple[QuoteSymbol,
 
 def _chunks(symbols: tuple[QuoteSymbol, ...], size: int) -> tuple[tuple[QuoteSymbol, ...], ...]:
     return tuple(symbols[index : index + size] for index in range(0, len(symbols), size))
+
+
+def _record_breaker_failure(
+    breaker: CircuitBreaker,
+    batch_issues: list[QuoteIssue],
+) -> None:
+    previous_state = breaker.state
+    breaker.record_failure()
+    if breaker.state.value == "open" and previous_state.value != "open":
+        batch_issues.append(
+            QuoteIssue(
+                code="circuit_opened",
+                message="provider circuit opened after consecutive failures",
+                severity=IssueSeverity.WARNING,
+            )
+        )

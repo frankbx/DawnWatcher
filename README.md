@@ -52,8 +52,11 @@ dawnwatcher calendar status
 dawnwatcher quotes collect 600000.SH 000001.SZ
 dawnwatcher quotes watch 600000.SH 000001.SZ
 dawnwatcher quotes watch 600000.SH 000001.SZ --interval 30 --max-runs 10
+dawnwatcher quotes stats --date 2026-09-28
 dawnwatcher quotes replay data/raw/quotes/YYYY-MM-DD/sina/example.json.gz \
   --expected-date 2026-09-24
+dawnwatcher monitor check
+dawnwatcher monitor watch
 ```
 
 `calendar sync` downloads the current calendar year from Tushare by default and atomically
@@ -105,6 +108,25 @@ an in-process circuit breaker per provider. There are no aggressive automatic HT
 If one provider is unavailable, a valid quote from the other remains usable but is marked
 `degraded`; strategy code in later phases must make an explicit decision about whether that
 quality is acceptable.
+
+`quotes stats` reports each provider's complete-run success rate, valid-quote coverage,
+average/p50/p95/max collection latency, circuit-open and circuit-suppression counts. It also
+reports dual-source request-start skew, per-field reconciliation conflicts, quality-state
+counts, and within-session collection gaps. Statistics are computed from persisted collection
+records for one Asia/Shanghai calendar date.
+
+`quotes watch` writes a durable heartbeat on every scheduler tick and after every collection.
+Run `monitor watch` as a separate supervised process so a dead or stalled quote watcher can be
+detected. The monitor checks quote-watcher heartbeat freshness, usable-collection freshness
+during active auction phases, and free space on the runtime data filesystem. Alerts are
+stateful: the first observation, severity escalation, and recovery are each enqueued once in
+the transactional notification outbox. External Feishu delivery is not implemented yet, so
+these alerts remain safely queued until a notification worker is added.
+
+Defaults are a 30-second monitor cadence, a 60-second stale-heartbeat threshold, a 60-second
+collection-gap threshold, a 5 GiB disk warning, and a 1 GiB disk critical alert. They can be
+changed with the corresponding `DAWNWATCHER_MONITOR_*`, `DAWNWATCHER_HEARTBEAT_*`,
+`DAWNWATCHER_COLLECTION_GAP_*`, and `DAWNWATCHER_DISK_*` settings shown in `.env.example`.
 
 ## Quality checks
 

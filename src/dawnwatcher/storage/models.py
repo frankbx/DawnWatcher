@@ -12,6 +12,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     Date,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -250,6 +251,55 @@ class TradingCalendarDay(Base):
     updated_at: Mapped[datetime] = mapped_column(
         UTCDateTime(), default=utc_now, onupdate=utc_now, nullable=False
     )
+
+
+class RuntimeHeartbeat(TimestampMixin, Base):
+    """Durable liveness record for one long-running process instance."""
+
+    __tablename__ = "runtime_heartbeat"
+    __table_args__ = (
+        UniqueConstraint("instance_id", name="uq_runtime_heartbeat_instance_id"),
+        Index(
+            "ix_runtime_heartbeat_service_status_time",
+            "service_name",
+            "status",
+            "heartbeat_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    service_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    instance_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    process_id: Mapped[int] = mapped_column(Integer(), nullable=False)
+    hostname: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    interval_seconds: Mapped[float] = mapped_column(Float(), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    heartbeat_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    stopped_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    details: Mapped[dict[str, Any]] = mapped_column(JSON(), default=dict, nullable=False)
+
+
+class OperationalAlert(TimestampMixin, Base):
+    """Stateful operational alert used to suppress duplicate notifications."""
+
+    __tablename__ = "operational_alert"
+    __table_args__ = (
+        UniqueConstraint("alert_key", name="uq_operational_alert_alert_key"),
+        Index("ix_operational_alert_status_severity", "status", "severity"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    alert_key: Mapped[str] = mapped_column(String(150), nullable=False)
+    category: Mapped[str] = mapped_column(String(50), nullable=False)
+    severity: Mapped[str] = mapped_column(String(20), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    summary: Mapped[str] = mapped_column(Text(), nullable=False)
+    details: Mapped[dict[str, Any]] = mapped_column(JSON(), default=dict, nullable=False)
+    first_triggered_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    last_observed_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    resolved_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    occurrence_count: Mapped[int] = mapped_column(Integer(), default=1, nullable=False)
 
 
 class ProviderQuoteSnapshot(Base):

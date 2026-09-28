@@ -79,3 +79,11 @@ def test_one_shot_collection_is_gated_unless_explicitly_overridden() -> None:
 
     assert regular.ignore_market_gate is False
     assert diagnostic.ignore_market_gate is True
+
+
+def test_stats_and_monitor_commands_parse() -> None:
+    stats = build_parser().parse_args(["quotes", "stats", "--date", "2026-09-28"])
+    monitor = build_parser().parse_args(["monitor", "watch", "--interval", "30"])
+
+    assert stats.date.isoformat() == "2026-09-28"
+    assert monitor.interval_seconds == 30.0

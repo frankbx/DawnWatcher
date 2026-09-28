@@ -48,6 +48,13 @@ class Settings(BaseSettings):
     circuit_failure_threshold: int = Field(default=3, ge=1, le=20)
     circuit_cooldown_seconds: float = Field(default=60.0, ge=1.0, le=3_600.0)
     archive_raw_quotes: bool = True
+    monitor_interval_seconds: float = Field(default=30.0, ge=5.0, le=3_600.0)
+    heartbeat_stale_seconds: float = Field(default=60.0, ge=15.0, le=86_400.0)
+    collection_gap_seconds: float = Field(default=60.0, ge=15.0, le=3_600.0)
+    disk_critical_free_bytes: int = Field(default=1 * 1024**3, ge=1)
+    disk_warning_free_bytes: int = Field(default=5 * 1024**3, ge=1)
+    alert_channel: str = "feishu"
+    alert_recipient: str = "operators"
 
     @field_validator("timezone")
     @classmethod
@@ -65,6 +72,16 @@ class Settings(BaseSettings):
         """Keep the SQLite file inside the managed data/db directory."""
         if not value or Path(value).name != value or value in {".", ".."}:
             raise ValueError("database_filename must be a plain filename")
+        return value
+
+    @field_validator("disk_warning_free_bytes")
+    @classmethod
+    def validate_disk_thresholds(cls, value: int, info: object) -> int:
+        """Keep the warning threshold above the critical threshold."""
+        data = getattr(info, "data", {})
+        critical = data.get("disk_critical_free_bytes")
+        if critical is not None and value <= critical:
+            raise ValueError("disk_warning_free_bytes must exceed disk_critical_free_bytes")
         return value
 
     @property
@@ -107,4 +124,11 @@ class Settings(BaseSettings):
             "circuit_failure_threshold": str(self.circuit_failure_threshold),
             "circuit_cooldown_seconds": str(self.circuit_cooldown_seconds),
             "archive_raw_quotes": str(self.archive_raw_quotes),
+            "monitor_interval_seconds": str(self.monitor_interval_seconds),
+            "heartbeat_stale_seconds": str(self.heartbeat_stale_seconds),
+            "collection_gap_seconds": str(self.collection_gap_seconds),
+            "disk_warning_free_bytes": str(self.disk_warning_free_bytes),
+            "disk_critical_free_bytes": str(self.disk_critical_free_bytes),
+            "alert_channel": self.alert_channel,
+            "alert_recipient": self.alert_recipient,
         }

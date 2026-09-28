@@ -8,8 +8,9 @@ import json
 import signal
 from collections.abc import Sequence
 from dataclasses import asdict
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session, sessionmaker
@@ -21,10 +22,18 @@ from dawnwatcher.logging import configure_logging
 from dawnwatcher.market import MarketPhase, MarketSessionStatus
 from dawnwatcher.market.gate import TushareTradingSessionGate
 from dawnwatcher.ops.health import run_startup_checks
+from dawnwatcher.ops.monitoring import (
+    QUOTE_WATCHER_SERVICE,
+    run_operational_checks,
+    start_runtime_heartbeat,
+    stop_runtime_heartbeat,
+    touch_runtime_heartbeat,
+)
 from dawnwatcher.ops.recovery import run_startup_recovery
 from dawnwatcher.providers.collector import MarketDataCollector, parse_symbols, replay_archive
 from dawnwatcher.storage.backup import online_backup
 from dawnwatcher.storage.database import create_database_engine, create_session_factory
+from dawnwatcher.storage.market_metrics import build_market_metrics_report
 from dawnwatcher.storage.market_quotes import persist_market_collection
 from dawnwatcher.storage.schema import inspect_schema, upgrade_database
 from dawnwatcher.workflows.interval import FixedIntervalScheduler, IntervalScheduleResult
@@ -155,6 +164,41 @@ def build_parser() -> argparse.ArgumentParser:
     )
     replay_parser.add_argument("archive", type=Path)
     replay_parser.add_argument("--expected-date", type=date.fromisoformat)
+    stats_parser = quote_commands.add_parser(
+        "stats", help="Summarize dual-source reliability for one local trading date."
+    )
+    stats_parser.add_argument(
+        "--date",
+        type=date.fromisoformat,
+        help="Local date in YYYY-MM-DD form; defaults to today.",
+    )
+
+    monitor_parser = subparsers.add_parser(
+        "monitor", help="Check or continuously monitor runtime operational health."
+    )
+    monitor_commands = monitor_parser.add_subparsers(dest="monitor_command", required=True)
+    monitor_check = monitor_commands.add_parser(
+        "check", help="Check heartbeats, collection freshness, and disk space once."
+    )
+    monitor_check.add_argument(
+        "--at",
+        type=datetime.fromisoformat,
+        help="Timezone-aware ISO timestamp; defaults to now.",
+    )
+    monitor_watch = monitor_commands.add_parser(
+        "watch", help="Continuously run operational checks."
+    )
+    monitor_watch.add_argument(
+        "--interval",
+        dest="interval_seconds",
+        type=_poll_interval_seconds,
+        help="Seconds between checks; defaults to configured value (30).",
+    )
+    monitor_watch.add_argument(
+        "--max-runs",
+        type=_positive_integer,
+        help="Stop after this many checks; omitted means run until stopped.",
+    )
     return parser
 
 
@@ -187,6 +231,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "quotes":
         return _run_quote_command(settings, args)
+
+    if args.command == "monitor":
+        return _run_monitor_command(settings, args)
 
     parser.error(f"unknown command: {args.command}")
 
@@ -310,6 +357,25 @@ def _run_quote_command(settings: Settings, args: argparse.Namespace) -> int:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
 
+    if args.quote_command == "stats":
+        local_zone = ZoneInfo(settings.timezone)
+        report_date = args.date or datetime.now(local_zone).date()
+        start_at = datetime.combine(report_date, time.min, tzinfo=local_zone)
+        end_at = start_at + timedelta(days=1)
+        engine = create_database_engine(settings)
+        try:
+            with create_session_factory(engine)() as session:
+                report = build_market_metrics_report(
+                    session,
+                    start_at=start_at,
+                    end_at=end_at,
+                    expected_interval_seconds=settings.market_poll_interval_seconds,
+                )
+        finally:
+            engine.dispose()
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0
+
     if args.quote_command == "watch":
         interval_seconds = args.interval_seconds or settings.market_poll_interval_seconds
         try:
@@ -337,6 +403,41 @@ def _run_quote_command(settings: Settings, args: argparse.Namespace) -> int:
         return 0 if schedule.failed_runs == 0 else 1
 
     raise ValueError(f"unsupported quote command: {args.quote_command}")
+
+
+def _run_monitor_command(settings: Settings, args: argparse.Namespace) -> int:
+    """Execute one or repeated operational health checks."""
+    if args.monitor_command == "check":
+        observed_at = args.at or datetime.now(UTC)
+        if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+            raise ValueError("--at must include a timezone offset")
+        report = asyncio.run(_monitor_once(settings, observed_at))
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0 if report["ok"] else 1
+
+    if args.monitor_command == "watch":
+        interval_seconds = args.interval_seconds or settings.monitor_interval_seconds
+        try:
+            result = asyncio.run(
+                _watch_monitor(
+                    settings,
+                    interval_seconds=interval_seconds,
+                    max_runs=args.max_runs,
+                )
+            )
+        except KeyboardInterrupt:
+            return 130
+        print(
+            json.dumps(
+                {"event": "monitor.schedule.stopped", **result.to_dict()},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            flush=True,
+        )
+        return 0 if result.failed_runs == 0 else 1
+
+    raise ValueError(f"unsupported monitor command: {args.monitor_command}")
 
 
 async def _collect_quotes(
@@ -384,6 +485,24 @@ async def _watch_quotes(
     engine = create_database_engine(settings)
     session_factory = create_session_factory(engine)
     gate = _build_trading_session_gate(settings, session_factory)
+    heartbeat_instance = str(uuid4())
+    heartbeat_details: dict[str, object] = {
+        "symbols": [symbol.ts_code for symbol in symbols],
+        "archive_raw": archive_raw,
+        "persist_quotes": persist,
+        "attempted_runs": 0,
+        "last_collection_at": None,
+        "last_usable_collection_at": None,
+    }
+    with session_factory.begin() as session:
+        start_runtime_heartbeat(
+            session,
+            service_name=QUOTE_WATCHER_SERVICE,
+            instance_id=heartbeat_instance,
+            interval_seconds=interval_seconds,
+            now=datetime.now(UTC),
+            details=dict(heartbeat_details),
+        )
     initial_status = await gate.status_at(datetime.now(UTC))
     print(
         json.dumps(
@@ -410,6 +529,21 @@ async def _watch_quotes(
             async def collect_once(run_number: int) -> bool:
                 nonlocal last_session
                 session_status = await gate.status_at(datetime.now(UTC))
+                heartbeat_details.update(
+                    {
+                        "attempted_runs": run_number,
+                        "last_tick_at": datetime.now(UTC).isoformat(),
+                        "trade_date": session_status.trade_date.isoformat(),
+                        "market_phase": session_status.phase.value,
+                    }
+                )
+                with session_factory.begin() as session:
+                    touch_runtime_heartbeat(
+                        session,
+                        instance_id=heartbeat_instance,
+                        now=datetime.now(UTC),
+                        details=dict(heartbeat_details),
+                    )
                 session_key = (session_status.trade_date, session_status.phase.value)
                 if session_key != last_session:
                     print(
@@ -432,6 +566,16 @@ async def _watch_quotes(
                 if persist:
                     with session_factory.begin() as session:
                         persist_market_collection(session, result)
+                heartbeat_details["last_collection_at"] = result.finished_at.isoformat()
+                if any(item.selected_quote is not None for item in result.reconciled.values()):
+                    heartbeat_details["last_usable_collection_at"] = result.finished_at.isoformat()
+                with session_factory.begin() as session:
+                    touch_runtime_heartbeat(
+                        session,
+                        instance_id=heartbeat_instance,
+                        now=datetime.now(UTC),
+                        details=dict(heartbeat_details),
+                    )
                 payload = result.to_dict(include_quotes=False)
                 print(
                     json.dumps(
@@ -447,11 +591,110 @@ async def _watch_quotes(
                 )
                 return True
 
-            return await FixedIntervalScheduler(interval_seconds).run(
+            schedule_result = await FixedIntervalScheduler(interval_seconds).run(
                 collect_once,
                 stop_event=stop_event,
                 max_runs=max_runs,
             )
+            heartbeat_details["schedule_result"] = schedule_result.to_dict()
+            return schedule_result
+    finally:
+        try:
+            with session_factory.begin() as session:
+                stop_runtime_heartbeat(
+                    session,
+                    instance_id=heartbeat_instance,
+                    now=datetime.now(UTC),
+                    details=dict(heartbeat_details),
+                )
+        except Exception:
+            # Shutdown must continue even if the heartbeat database is unavailable.
+            pass
+        engine.dispose()
+        for registered_signal in registered_signals:
+            loop.remove_signal_handler(registered_signal)
+
+
+async def _monitor_once(settings: Settings, observed_at: datetime) -> dict[str, object]:
+    """Run one operational check and synchronize alert state transactionally."""
+    settings.ensure_runtime_directories()
+    engine = create_database_engine(settings)
+    try:
+        session_factory = create_session_factory(engine)
+        gate = _build_trading_session_gate(settings, session_factory)
+        market_status = await gate.status_at(observed_at)
+        with session_factory.begin() as session:
+            return run_operational_checks(
+                session,
+                settings=settings,
+                market_status=market_status,
+                observed_at=observed_at,
+            )
+    finally:
+        engine.dispose()
+
+
+async def _watch_monitor(
+    settings: Settings,
+    *,
+    interval_seconds: float,
+    max_runs: int | None,
+) -> IntervalScheduleResult:
+    """Continuously evaluate operational checks in a process separate from quote watch."""
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    registered_signals: list[signal.Signals] = []
+    for watched_signal in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(watched_signal, stop_event.set)
+        except (NotImplementedError, RuntimeError):
+            continue
+        registered_signals.append(watched_signal)
+
+    print(
+        json.dumps(
+            {
+                "event": "monitor.schedule.started",
+                "interval_seconds": interval_seconds,
+                "max_runs": max_runs,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+        flush=True,
+    )
+
+    settings.ensure_runtime_directories()
+    engine = create_database_engine(settings)
+    session_factory = create_session_factory(engine)
+    gate = _build_trading_session_gate(settings, session_factory)
+
+    async def check_once(run_number: int) -> bool:
+        observed_at = datetime.now(UTC)
+        market_status = await gate.status_at(observed_at)
+        with session_factory.begin() as session:
+            report = run_operational_checks(
+                session,
+                settings=settings,
+                market_status=market_status,
+                observed_at=observed_at,
+            )
+        print(
+            json.dumps(
+                {"event": "monitor.check.completed", "run_number": run_number, **report},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            flush=True,
+        )
+        return True
+
+    try:
+        return await FixedIntervalScheduler(interval_seconds).run(
+            check_once,
+            stop_event=stop_event,
+            max_runs=max_runs,
+        )
     finally:
         engine.dispose()
         for registered_signal in registered_signals:

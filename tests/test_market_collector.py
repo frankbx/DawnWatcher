@@ -158,6 +158,31 @@ def test_provider_failure_releases_other_provider_from_start_barrier(tmp_path: P
     assert all(item.state is DataQualityState.DEGRADED for item in result.reconciled.values())
 
 
+def test_collection_reports_circuit_open_and_suppressed_events(tmp_path: Path) -> None:
+    settings = Settings(data_dir=tmp_path, circuit_failure_threshold=1, _env_file=None)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "hq.sinajs.cn":
+            return httpx.Response(500)
+        provider_code = str(request.url).split("=", maxsplit=1)[1]
+        return httpx.Response(200, content=tencent_line(provider_code).encode("gb18030"))
+
+    async def exercise():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            collector = MarketDataCollector(settings, client=client)
+            symbols = parse_symbols(["600000.SH"])
+            first = await collector.collect(symbols, archive_raw=False)
+            second = await collector.collect(symbols, archive_raw=False)
+            return first, second
+
+    first, second = asyncio.run(exercise())
+    first_codes = {item.code for item in first.providers[QuoteProvider.SINA].batch_issues}
+    second_codes = {item.code for item in second.providers[QuoteProvider.SINA].batch_issues}
+
+    assert "circuit_opened" in first_codes
+    assert "circuit_open" in second_codes
+
+
 def _single_symbol_handler(request: httpx.Request) -> httpx.Response:
     if request.url.host == "hq.sinajs.cn":
         return httpx.Response(200, content=sina_line().encode("gb18030"))
