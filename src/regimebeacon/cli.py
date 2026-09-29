@@ -28,6 +28,7 @@ from regimebeacon.notifications.feishu import (
     FeishuWebhookClient,
 )
 from regimebeacon.notifications.worker import NotificationDeliveryWorker
+from regimebeacon.ops.daily_acceptance import run_daily_acceptance
 from regimebeacon.ops.health import run_startup_checks
 from regimebeacon.ops.monitoring import (
     QUOTE_WATCHER_SERVICE,
@@ -384,6 +385,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="Stop after this many polls; omitted means run until stopped.",
     )
 
+    acceptance_parser = subparsers.add_parser(
+        "acceptance", help="Validate completed trading-day collection and sealed minute files."
+    )
+    acceptance_commands = acceptance_parser.add_subparsers(dest="acceptance_command", required=True)
+    acceptance_run = acceptance_commands.add_parser(
+        "run", help="Write one daily verdict and notify."
+    )
+    acceptance_run.add_argument("--date", type=date.fromisoformat, required=True)
+    acceptance_run.add_argument(
+        "--pool-file",
+        type=Path,
+        default=Path("config/stock_pools/initial-v1/pool.json"),
+    )
+
     runtime_parser = subparsers.add_parser(
         "runtime", help="Run the unattended trading-day service supervisor."
     )
@@ -475,6 +490,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "notifications":
         return _run_notification_command(settings, args)
+
+    if args.command == "acceptance":
+        return _run_acceptance_command(settings, args)
 
     if args.command == "runtime":
         return _run_runtime_command(settings, args)
@@ -956,6 +974,27 @@ def _run_runtime_command(settings: Settings, args: argparse.Namespace) -> int:
         return 0
     finally:
         engine.dispose()
+
+
+def _run_acceptance_command(settings: Settings, args: argparse.Namespace) -> int:
+    """Validate one finished date and queue a durable final report."""
+    if args.acceptance_command != "run":
+        raise ValueError(f"unsupported acceptance command: {args.acceptance_command}")
+    settings.ensure_runtime_directories()
+    upgrade_database(settings)
+    engine = create_database_engine(settings)
+    try:
+        factory = create_session_factory(engine)
+        report = run_daily_acceptance(
+            settings,
+            factory,
+            trade_date=args.date,
+            pool_file=args.pool_file,
+        )
+    finally:
+        engine.dispose()
+    print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
+    return 0
 
 
 def _resolve_runtime_path(project_root: Path, path: Path) -> Path:

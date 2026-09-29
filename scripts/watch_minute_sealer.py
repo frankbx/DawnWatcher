@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import fcntl
 import json
+import os
 from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any
@@ -51,6 +53,9 @@ def parse_args() -> argparse.Namespace:
         "--output-root",
         type=Path,
         help="Defaults to data/lake/minute_market.",
+    )
+    parser.add_argument(
+        "--result-file", type=Path, help="Write a structured result for the supervisor."
     )
     return parser.parse_args()
 
@@ -123,7 +128,9 @@ async def run(args: argparse.Namespace) -> None:
         {MinuteTradingSession(value) for value in args.sessions},
         key=lambda value: _SEAL_TIMES[value],
     )
-    failed = False
+    incomplete = False
+    transient_failure = False
+    results: list[dict[str, Any]] = []
     for trading_session in sessions:
         due = datetime.combine(trade_date, _SEAL_TIMES[trading_session], tzinfo=zone)
         await asyncio.sleep(max(0.0, (due - datetime.now(zone)).total_seconds()))
@@ -143,10 +150,13 @@ async def run(args: argparse.Namespace) -> None:
             )
             seal_succeeded = True
             if not payload["seal"]["complete"]:
-                failed = True
+                incomplete = True
                 payload["event"] = "market.minute_session.sealed_incomplete"
         except Exception as exc:
-            failed = True
+            if isinstance(exc, ValueError) and "no minute bars found" in str(exc):
+                incomplete = True
+            else:
+                transient_failure = True
             payload = {
                 "event": "market.minute_session.seal_failed",
                 "observed_at": observed_at.isoformat(),
@@ -155,6 +165,7 @@ async def run(args: argparse.Namespace) -> None:
                 "error_type": type(exc).__name__,
                 "error": str(exc),
             }
+        results.append(payload)
         print(json.dumps(payload, ensure_ascii=False), flush=True)
         if trading_session is MinuteTradingSession.AFTERNOON and seal_succeeded:
             try:
@@ -171,10 +182,13 @@ async def run(args: argparse.Namespace) -> None:
                     "seal": day_report.to_dict(),
                 }
                 if not day_report.complete:
-                    failed = True
+                    incomplete = True
                     day_payload["event"] = "market.minute_day.sealed_incomplete"
             except Exception as exc:
-                failed = True
+                if isinstance(exc, FileNotFoundError) and incomplete:
+                    pass
+                else:
+                    transient_failure = True
                 day_payload = {
                     "event": "market.minute_day.seal_failed",
                     "observed_at": datetime.now(zone).isoformat(),
@@ -182,13 +196,95 @@ async def run(args: argparse.Namespace) -> None:
                     "error_type": type(exc).__name__,
                     "error": str(exc),
                 }
+            results.append(day_payload)
             print(json.dumps(day_payload, ensure_ascii=False), flush=True)
-    if failed:
-        raise SystemExit(1)
+    # A temporary I/O or database failure must still be retried even when an
+    # earlier session was also incomplete. The bounded supervisor retry will
+    # eventually publish the final incomplete verdict if nothing recovers.
+    failure_kind = (
+        "transient_failure" if transient_failure else "data_incomplete" if incomplete else None
+    )
+    result = {
+        "trade_date": trade_date.isoformat(),
+        "success": failure_kind is None,
+        "failure_kind": failure_kind,
+        "retryable": failure_kind == "transient_failure",
+        "events": results,
+    }
+    if args.result_file is not None:
+        _write_result(args.result_file, result)
+    if failure_kind is not None:
+        raise SystemExit(75 if failure_kind == "transient_failure" else 2)
+
+
+def _write_result(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".partial")
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _terminal_result(path: Path, trade_date: date) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("trade_date") != trade_date.isoformat():
+        return None
+    if payload.get("success") is True or (
+        payload.get("failure_kind") == "data_incomplete" and payload.get("retryable") is False
+    ):
+        return payload
+    return None
+
+
+def run_exclusively(args: argparse.Namespace) -> None:
+    """Serialize per-date sealing and reuse terminal outcomes after a parent crash."""
+    settings = Settings()
+    trade_date = args.date or datetime.now(ZoneInfo(settings.timezone)).date()
+    lock_path = (
+        settings.data_dir / "reports" / "runtime" / trade_date.isoformat() / "minute-sealer.lock"
+    )
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        result = (
+            _terminal_result(args.result_file, trade_date) if args.result_file is not None else None
+        )
+        if result is not None:
+            print(
+                json.dumps(
+                    {
+                        "event": "market.minute_sealer.result_reused",
+                        "trade_date": trade_date.isoformat(),
+                        "success": result["success"],
+                        "failure_kind": result.get("failure_kind"),
+                    },
+                    ensure_ascii=False,
+                ),
+                flush=True,
+            )
+            if not result["success"]:
+                raise SystemExit(2)
+            return
+        asyncio.run(run(args))
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
 
 
 def main() -> None:
-    asyncio.run(run(parse_args()))
+    run_exclusively(parse_args())
 
 
 if __name__ == "__main__":

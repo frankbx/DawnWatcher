@@ -63,6 +63,10 @@ class Settings(BaseSettings):
     notification_lease_seconds: int = Field(default=30, ge=5, le=300)
     notification_retry_base_seconds: int = Field(default=30, ge=1, le=3_600)
     notification_retry_max_seconds: int = Field(default=1_800, ge=1, le=86_400)
+    acceptance_min_valid_quote_rate_pct: float = Field(default=99.5, ge=0, le=100)
+    acceptance_min_successful_run_rate_pct: float = Field(default=99.0, ge=0, le=100)
+    acceptance_max_p95_latency_ms: float = Field(default=15_000, ge=1)
+    acceptance_max_gap_seconds: float = Field(default=60, ge=1)
 
     @field_validator("timezone")
     @classmethod
@@ -157,4 +161,10 @@ class Settings(BaseSettings):
             "notification_lease_seconds": str(self.notification_lease_seconds),
             "notification_retry_base_seconds": str(self.notification_retry_base_seconds),
             "notification_retry_max_seconds": str(self.notification_retry_max_seconds),
+            "acceptance_min_valid_quote_rate_pct": str(self.acceptance_min_valid_quote_rate_pct),
+            "acceptance_min_successful_run_rate_pct": str(
+                self.acceptance_min_successful_run_rate_pct
+            ),
+            "acceptance_max_p95_latency_ms": str(self.acceptance_max_p95_latency_ms),
+            "acceptance_max_gap_seconds": str(self.acceptance_max_gap_seconds),
         }

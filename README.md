@@ -75,6 +75,7 @@ regimebeacon features show --date 2026-09-28 --symbol 600000.SH
 regimebeacon features seal --date 2026-09-28 --session morning
 regimebeacon features seal --date 2026-09-28 --session afternoon
 regimebeacon features merge-day --date 2026-09-28
+regimebeacon acceptance run --date 2026-09-28
 regimebeacon monitor check
 regimebeacon monitor watch
 regimebeacon notifications deliver --max-items 20
@@ -212,14 +213,36 @@ non-trading days, and reconciles child processes every five seconds on an open d
 - 15:00:30: stop quote collection after the inclusive 15:00 tick;
 - 15:01: stop market-analysis and status-report processes;
 - 15:02: seal the afternoon partition and merge the whole-day Parquet file;
-- 15:15: stop operational support processes after the normal post-close drain.
+- after the sealer finishes: validate the day's collection and sealed minute files, then
+  enqueue one daily acceptance card;
+- 15:15: stop normal operational support processes; after a late seal or acceptance,
+  continue notification delivery for a two-minute drain.
 
 The supervisor uses an advisory lock so two instances cannot collect the same pool. A failed
 continuous service is restarted after ten seconds. Daily analysis/report services receive up
 to three attempts, and a terminal failure is written to the notification outbox. If the host
 or supervisor starts late, the minute sealer can catch up until 23:50. Its per-date result
-marker prevents duplicate sealing after a supervisor restart. Runtime logs are split under
+marker preserves retry counts across supervisor restarts: incomplete market data is a final
+result, whereas transient sealing failures receive up to three attempts. An unknown trading
+calendar fails closed and sends an operational alert through the notification worker; a later
+calendar recovery is also reported. An intentional supervisor restart does not consume a
+sealing attempt; a sealer still running at its 23:50 deadline is terminated and alerted, with
+daily acceptance allowed to catch up until 23:58. A per-date sealer lock also prevents
+concurrent Parquet writes if an old child survives an unexpected supervisor exit. Runtime logs are split under
 `data/reports/runtime/YYYY-MM-DD/`; the supervisor log remains under `data/reports/`.
+
+`acceptance run` is automatically scheduled once the sealer reaches a terminal result, including
+an incomplete result. It checks expected 15-second slots across the opening call auction,
+morning continuous auction, afternoon continuous auction, and closing call auction; Tencent
+valid-quote coverage, complete-run rate, P95 latency, circuit trips, and the full stock-pool
+coverage; and both session Parquet partitions plus the merged day file. A complete ordinary
+trading day has 130 morning and 120 afternoon minute timestamps (250 total), including the
+opening call auction. The report is written atomically to
+`data/reports/daily/YYYY-MM-DD/acceptance.json`, recorded as an idempotent `job_run`, and
+queued once as a Feishu Card 2.0 verdict. A failed data-quality verdict is a completed
+assessment, not a command crash. The default thresholds are 99.5% valid quotes, 99% complete
+runs, 15,000 ms P95 latency, and a 60-second maximum missing collection gap; see
+`.env.example` for configuration. The card distinguishes passed, warning, and failed days.
 
 On macOS, install and immediately load the per-user launch agent once:
 

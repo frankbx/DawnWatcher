@@ -184,6 +184,8 @@ def format_notification_text(notification: NotificationOutbox) -> str:
 
 def build_alert_card(notification: NotificationOutbox) -> dict[str, Any]:
     """Build a mobile-friendly Feishu Card JSON 2.0 alert."""
+    if notification.event_type == "market.daily_acceptance.completed":
+        return build_daily_acceptance_card(notification.payload)
     payload = notification.payload
     transition = str(payload.get("transition", "triggered"))
     transition_text = {
@@ -219,6 +221,37 @@ def build_alert_card(notification: NotificationOutbox) -> dict[str, Any]:
                 }
             ]
         },
+    }
+
+
+def build_daily_acceptance_card(payload: dict[str, Any]) -> dict[str, Any]:
+    """Render the durable post-close verdict as a compact phone card."""
+    verdict = str(payload.get("verdict", "failed"))
+    label = {"passed": "通过", "warning": "需关注", "failed": "失败"}.get(verdict, "失败")
+    template = {"passed": "green", "warning": "orange", "failed": "red"}.get(verdict, "red")
+    reasons = [str(item) for item in payload.get("failures", [])] + [
+        str(item) for item in payload.get("warnings", [])
+    ]
+    lines = [
+        f"**交易日**：{payload.get('trade_date', '未知')}",
+        f"**验收结论**：{label}",
+        f"**采集轮次**：{payload.get('collection_count', '未知')}",
+        f"**有效行情率**：{payload.get('valid_quote_rate_pct', '无数据')}%",
+        f"**完整轮次率**：{payload.get('successful_run_rate_pct', '无数据')}%",
+        f"**P95 延迟**：{payload.get('p95_latency_ms', '无数据')} ms",
+        f"**缺失槽位**：{payload.get('missing_slot_count', '未知')}，最大缺口 {payload.get('max_missing_gap_seconds', '未知')} 秒",
+        f"**整日分钟数据**：{'完整' if payload.get('day_complete') else '不完整'}，{payload.get('day_row_count', '无数据')}/{payload.get('expected_day_row_count', '未知')} 行",
+    ]
+    lines.extend(f"- {reason}" for reason in reasons[:8])
+    lines.append(f"报告：{payload.get('report_path', '未知')}")
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "title": {"tag": "plain_text", "content": "RegimeBeacon 每日运行验收"},
+            "template": template,
+        },
+        "body": {"elements": [{"tag": "markdown", "content": "\n".join(lines)[:4_000]}]},
     }
 
 

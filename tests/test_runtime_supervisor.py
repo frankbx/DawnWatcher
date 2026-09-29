@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
+import os
 from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import pytest
 from scripts.install_macos_launch_agent import build_launch_agent
 
 from regimebeacon.config import Settings
@@ -34,7 +37,7 @@ def test_runtime_plans_full_trading_day_services(tmp_path: Path) -> None:
     assert quote_plan.stop_at == datetime(2026, 9, 30, 15, 0, 30, tzinfo=_ZONE)
     sealer = next(plan for plan in plans if plan.name == "minute_sealer")
     assert sealer.result_marker is not None
-    assert sealer.restart_policy == "never"
+    assert sealer.restart_policy == "on_failure"
 
 
 def test_runtime_does_nothing_on_closed_date(tmp_path: Path) -> None:
@@ -59,9 +62,65 @@ def test_runtime_stops_collection_and_can_catch_up_sealing(tmp_path: Path) -> No
     marker = next(plan.result_marker for plan in plans if plan.name == "minute_sealer")
     assert marker is not None
     marker.parent.mkdir(parents=True)
-    marker.write_text("{}\n", encoding="utf-8")
+    marker.write_text(json.dumps({"terminal": True, "success": False}), encoding="utf-8")
+
+    assert {plan.name for plan in _plans(tmp_path, now=now, is_open=True)} == {
+        "monitor",
+        "notification_worker",
+        "daily_acceptance",
+    }
+    acceptance_marker = marker.with_name("daily-acceptance-result.json")
+    acceptance_marker.write_text(json.dumps({"terminal": True, "success": True}), encoding="utf-8")
 
     assert _plans(tmp_path, now=now, is_open=True) == ()
+
+
+def test_retryable_sealer_marker_starts_another_attempt(tmp_path: Path) -> None:
+    now = datetime(2026, 9, 30, 16, 0, tzinfo=_ZONE)
+    marker = tmp_path / "data" / "reports" / "runtime" / "2026-09-30" / "minute-sealer-result.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(
+        json.dumps({"terminal": False, "retryable": True, "attempt_count": 1}),
+        encoding="utf-8",
+    )
+
+    assert "minute_sealer" in {plan.name for plan in _plans(tmp_path, now=now, is_open=True)}
+    assert "daily_acceptance" not in {plan.name for plan in _plans(tmp_path, now=now, is_open=True)}
+
+
+def test_acceptance_can_run_after_sealer_deadline(tmp_path: Path) -> None:
+    now = datetime(2026, 9, 30, 23, 51, tzinfo=_ZONE)
+    marker = tmp_path / "data" / "reports" / "runtime" / "2026-09-30" / "minute-sealer-result.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(
+        json.dumps({"terminal": True, "success": False, "failure_kind": "deadline_exceeded"}),
+        encoding="utf-8",
+    )
+
+    assert {plan.name for plan in _plans(tmp_path, now=now, is_open=True)} == {
+        "monitor",
+        "notification_worker",
+        "daily_acceptance",
+    }
+
+
+def test_unknown_calendar_starts_notification_worker(tmp_path: Path) -> None:
+    now = datetime(2026, 9, 30, 10, 0, tzinfo=_ZONE)
+    status = ChinaAStockCalendar({}).status_at(now)
+    plans = build_runtime_service_plans(
+        settings=Settings(data_dir=tmp_path / "data", _env_file=None),
+        status=status,
+        local_now=now,
+        project_root=tmp_path,
+        pool_file=tmp_path / "pool.json",
+        industry_map_file=tmp_path / "industry.json",
+        symbols=("600000.SH",),
+        market_benchmark="510300.SH",
+        analysis_window_minutes=15,
+        status_interval_minutes=15,
+    )
+
+    assert {plan.name for plan in plans} == {"notification_worker"}
 
 
 def test_runtime_has_no_services_before_preflight(tmp_path: Path) -> None:
@@ -72,6 +131,68 @@ def test_runtime_has_no_services_before_preflight(tmp_path: Path) -> None:
     )
 
     assert plans == ()
+
+
+@pytest.mark.parametrize(
+    ("hour", "minute", "second", "expected"),
+    [
+        (8, 50, 0, {"monitor", "notification_worker"}),
+        (9, 14, 29, {"monitor", "notification_worker"}),
+        (
+            9,
+            14,
+            30,
+            {"quote_watcher", "monitor", "notification_worker", "market_analysis", "minute_sealer"},
+        ),
+        (
+            15,
+            0,
+            29,
+            {
+                "quote_watcher",
+                "monitor",
+                "notification_worker",
+                "market_analysis",
+                "market_status",
+                "minute_sealer",
+            },
+        ),
+        (
+            15,
+            0,
+            30,
+            {"monitor", "notification_worker", "market_analysis", "market_status", "minute_sealer"},
+        ),
+        (15, 1, 0, {"monitor", "notification_worker", "minute_sealer"}),
+        (15, 15, 0, {"monitor", "notification_worker", "minute_sealer"}),
+    ],
+)
+def test_runtime_service_boundaries(
+    tmp_path: Path, hour: int, minute: int, second: int, expected: set[str]
+) -> None:
+    now = datetime(2026, 9, 30, hour, minute, second, tzinfo=_ZONE)
+
+    assert {plan.name for plan in _plans(tmp_path, now=now, is_open=True)} == expected
+
+
+def test_terminal_result_keeps_notification_worker_for_two_minute_drain(
+    tmp_path: Path,
+) -> None:
+    report_dir = tmp_path / "data" / "reports" / "runtime" / "2026-09-30"
+    report_dir.mkdir(parents=True)
+    completed_at = datetime(2026, 9, 30, 16, 0, tzinfo=_ZONE)
+    for name in ("minute-sealer-result.json", "daily-acceptance-result.json"):
+        marker = report_dir / name
+        marker.write_text(json.dumps({"terminal": True, "success": True}), encoding="utf-8")
+        timestamp = completed_at.timestamp()
+        os.utime(marker, (timestamp, timestamp))
+
+    during_drain = _plans(tmp_path, now=datetime(2026, 9, 30, 16, 1, tzinfo=_ZONE), is_open=True)
+    after_drain = _plans(tmp_path, now=datetime(2026, 9, 30, 16, 3, tzinfo=_ZONE), is_open=True)
+
+    assert {plan.name for plan in during_drain} == {"notification_worker"}
+    assert during_drain[0].stop_at == datetime(2026, 9, 30, 16, 2, tzinfo=_ZONE)
+    assert after_drain == ()
 
 
 def test_macos_launch_agent_runs_one_keepalive_supervisor(tmp_path: Path) -> None:
