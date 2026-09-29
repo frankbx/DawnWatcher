@@ -8,13 +8,7 @@ from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, field_validator
-from pydantic_settings import (
-    BaseSettings,
-    DotEnvSettingsSource,
-    EnvSettingsSource,
-    PydanticBaseSettingsSource,
-    SettingsConfigDict,
-)
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
@@ -69,37 +63,6 @@ class Settings(BaseSettings):
     notification_lease_seconds: int = Field(default=30, ge=5, le=300)
     notification_retry_base_seconds: int = Field(default=30, ge=1, le=3_600)
     notification_retry_max_seconds: int = Field(default=1_800, ge=1, le=86_400)
-
-    @classmethod
-    def settings_customise_sources(
-        cls,
-        settings_cls: type[BaseSettings],
-        init_settings: PydanticBaseSettingsSource,
-        env_settings: PydanticBaseSettingsSource,
-        dotenv_settings: PydanticBaseSettingsSource,
-        file_secret_settings: PydanticBaseSettingsSource,
-    ) -> tuple[PydanticBaseSettingsSource, ...]:
-        """Accept legacy DAWNWATCHER_* settings below the new canonical prefix."""
-        legacy_env = EnvSettingsSource(
-            settings_cls,
-            case_sensitive=False,
-            env_prefix="DAWNWATCHER_",
-        )
-        legacy_dotenv = DotEnvSettingsSource(
-            settings_cls,
-            env_file=getattr(dotenv_settings, "env_file", None),
-            env_file_encoding="utf-8",
-            case_sensitive=False,
-            env_prefix="DAWNWATCHER_",
-        )
-        return (
-            init_settings,
-            env_settings,
-            legacy_env,
-            dotenv_settings,
-            legacy_dotenv,
-            file_secret_settings,
-        )
 
     @field_validator("timezone")
     @classmethod

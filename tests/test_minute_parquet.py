@@ -82,7 +82,6 @@ def test_seals_complete_afternoon_partition_atomically(
     table = pq.ParquetFile(parquet_path).read()
     assert table.num_rows == 240
     assert table.schema.metadata[b"regimebeacon.schema_version"] == b"1"
-    assert table.schema.metadata[b"dawnwatcher.schema_version"] == b"1"
     assert "industry_l1" in table.column_names
 
 

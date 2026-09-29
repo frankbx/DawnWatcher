@@ -605,9 +605,6 @@ def _arrow_schema() -> Any:
     metadata = {
         b"regimebeacon.dataset": b"minute_market",
         b"regimebeacon.schema_version": str(PARQUET_SCHEMA_VERSION).encode(),
-        # Keep the former keys readable during the project-name transition.
-        b"dawnwatcher.dataset": b"minute_market",
-        b"dawnwatcher.schema_version": str(PARQUET_SCHEMA_VERSION).encode(),
     }
     return pa.schema(fields, metadata=metadata)
 

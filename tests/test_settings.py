@@ -35,23 +35,6 @@ def test_poll_interval_can_be_overridden_from_environment(monkeypatch: object) -
     assert settings.market_poll_interval_seconds == 30.0
 
 
-def test_legacy_environment_prefix_remains_compatible(monkeypatch: object) -> None:
-    monkeypatch.setenv("DAWNWATCHER_MARKET_POLL_INTERVAL_SECONDS", "45")  # type: ignore[attr-defined]
-
-    settings = Settings(_env_file=None)
-
-    assert settings.market_poll_interval_seconds == 45.0
-
-
-def test_new_environment_prefix_wins_over_legacy(monkeypatch: object) -> None:
-    monkeypatch.setenv("DAWNWATCHER_MARKET_POLL_INTERVAL_SECONDS", "45")  # type: ignore[attr-defined]
-    monkeypatch.setenv("REGIMEBEACON_MARKET_POLL_INTERVAL_SECONDS", "30")  # type: ignore[attr-defined]
-
-    settings = Settings(_env_file=None)
-
-    assert settings.market_poll_interval_seconds == 30.0
-
-
 def test_database_filename_cannot_escape_managed_directory() -> None:
     with pytest.raises(ValidationError, match="plain filename"):
         Settings(database_filename="../outside.sqlite3", _env_file=None)

@@ -33,10 +33,9 @@ parquet = [
 
 [project.scripts]
 regimebeacon = "regimebeacon.cli:main"
-dawnwatcher = "regimebeacon.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/regimebeacon", "src/dawnwatcher"]
+packages = ["src/regimebeacon"]
 
 [tool.ruff]
 target-version = "py312"
@@ -47,7 +46,7 @@ src = ["src", "tests"]
 select = ["E4", "E7", "E9", "F", "I", "UP", "B"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["regimebeacon", "dawnwatcher"]
+known-first-party = ["regimebeacon"]
 
 [tool.ruff.format]
 quote-style = "double"

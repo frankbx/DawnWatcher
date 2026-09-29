@@ -82,10 +82,6 @@ regimebeacon notifications watch
 regimebeacon runtime run --project-root "$PWD"
 ```
 
-`regimebeacon` is the canonical command. The former `dawnwatcher` command and
-`DAWNWATCHER_*` environment variables remain accepted as migration aliases; new
-configuration should use the `REGIMEBEACON_*` prefix shown in `.env.example`.
-
 `calendar sync` downloads the current calendar year from Tushare by default and atomically
 upserts all natural dates into SQLite. Explicit `--start-date` and `--end-date` ranges are also
 supported. Runtime gates use the local cache and refresh it at most once every 24 hours; a
