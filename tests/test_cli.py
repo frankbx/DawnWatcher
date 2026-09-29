@@ -146,3 +146,22 @@ def test_minute_feature_commands_parse() -> None:
     assert seal.output_root == Path("custom-lake")
     assert merge_day.date.isoformat() == "2026-09-28"
     assert merge_day.output_root == Path("daily-lake")
+
+
+def test_unattended_runtime_command_parses() -> None:
+    args = build_parser().parse_args(
+        [
+            "runtime",
+            "run",
+            "--project-root",
+            "/tmp/dawnwatcher",
+            "--poll-interval",
+            "10",
+            "--max-cycles",
+            "1",
+        ]
+    )
+
+    assert args.project_root == Path("/tmp/dawnwatcher")
+    assert args.poll_interval == 10
+    assert args.max_cycles == 1

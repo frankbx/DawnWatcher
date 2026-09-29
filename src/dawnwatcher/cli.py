@@ -38,6 +38,7 @@ from dawnwatcher.ops.monitoring import (
 )
 from dawnwatcher.ops.recovery import run_startup_recovery
 from dawnwatcher.providers.collector import MarketDataCollector, parse_symbols, replay_archive
+from dawnwatcher.runtime import RuntimeAlreadyRunningError, TradingDayRuntimeSupervisor
 from dawnwatcher.storage.backup import online_backup
 from dawnwatcher.storage.database import create_database_engine, create_session_factory
 from dawnwatcher.storage.market_metrics import build_market_metrics_report
@@ -382,6 +383,57 @@ def build_parser() -> argparse.ArgumentParser:
         type=_positive_integer,
         help="Stop after this many polls; omitted means run until stopped.",
     )
+
+    runtime_parser = subparsers.add_parser(
+        "runtime", help="Run the unattended trading-day service supervisor."
+    )
+    runtime_commands = runtime_parser.add_subparsers(dest="runtime_command", required=True)
+    runtime_run = runtime_commands.add_parser(
+        "run", help="Continuously start and stop trading-day services from the calendar."
+    )
+    runtime_run.add_argument(
+        "--project-root",
+        type=Path,
+        default=Path.cwd(),
+        help="Project root containing scripts and config; defaults to the current directory.",
+    )
+    runtime_run.add_argument(
+        "--pool-file",
+        type=Path,
+        default=Path("config/stock_pools/initial-v1/pool.json"),
+    )
+    runtime_run.add_argument(
+        "--symbols-file",
+        type=Path,
+        default=Path("config/stock_pools/initial-v1/all_symbols.txt"),
+    )
+    runtime_run.add_argument(
+        "--industry-map",
+        type=Path,
+        default=Path("config/stock_pools/initial-v1/industry_benchmarks.json"),
+    )
+    runtime_run.add_argument("--market-benchmark", default="510300.SH")
+    runtime_run.add_argument(
+        "--analysis-window-minutes",
+        type=_positive_integer,
+        default=15,
+    )
+    runtime_run.add_argument(
+        "--status-interval-minutes",
+        type=_positive_integer,
+        default=15,
+    )
+    runtime_run.add_argument(
+        "--poll-interval",
+        type=_poll_interval_seconds,
+        default=5.0,
+        help="Seconds between service reconciliation cycles (default: 5).",
+    )
+    runtime_run.add_argument(
+        "--max-cycles",
+        type=_positive_integer,
+        help="Diagnostic bound; omitted means run continuously.",
+    )
     return parser
 
 
@@ -423,6 +475,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "notifications":
         return _run_notification_command(settings, args)
+
+    if args.command == "runtime":
+        return _run_runtime_command(settings, args)
 
     parser.error(f"unknown command: {args.command}")
 
@@ -846,6 +901,65 @@ def _run_notification_command(settings: Settings, args: argparse.Namespace) -> i
         return 0 if schedule.failed_runs == 0 else 1
 
     raise ValueError(f"unsupported notification command: {args.notification_command}")
+
+
+def _run_runtime_command(settings: Settings, args: argparse.Namespace) -> int:
+    """Run the single-instance unattended trading-day supervisor."""
+    if args.runtime_command != "run":
+        raise ValueError(f"unsupported runtime command: {args.runtime_command}")
+    project_root = args.project_root.resolve()
+    settings = settings.model_copy(
+        update={
+            "data_dir": _resolve_runtime_path(project_root, settings.data_dir),
+            "tushare_token_file": _resolve_runtime_path(project_root, settings.tushare_token_file),
+            "feishu_webhook_file": _resolve_runtime_path(
+                project_root, settings.feishu_webhook_file
+            ),
+            "feishu_signing_secret_file": _resolve_runtime_path(
+                project_root, settings.feishu_signing_secret_file
+            ),
+        }
+    )
+    settings.ensure_runtime_directories()
+    upgrade_database(settings)
+    engine = create_database_engine(settings)
+    try:
+        factory = create_session_factory(engine)
+        run_startup_recovery(factory)
+        gate = _build_trading_session_gate(settings, factory)
+        supervisor = TradingDayRuntimeSupervisor(
+            settings,
+            factory,
+            gate,
+            project_root=project_root,
+            pool_file=args.pool_file,
+            industry_map_file=args.industry_map,
+            symbols_file=args.symbols_file,
+            market_benchmark=args.market_benchmark,
+            analysis_window_minutes=args.analysis_window_minutes,
+            status_interval_minutes=args.status_interval_minutes,
+            poll_interval_seconds=args.poll_interval,
+        )
+        try:
+            asyncio.run(supervisor.run(max_cycles=args.max_cycles))
+        except KeyboardInterrupt:
+            return 130
+        except RuntimeAlreadyRunningError as exc:
+            print(
+                json.dumps(
+                    {"event": "runtime.supervisor.already_running", "error": str(exc)},
+                    ensure_ascii=False,
+                ),
+                flush=True,
+            )
+            return 2
+        return 0
+    finally:
+        engine.dispose()
+
+
+def _resolve_runtime_path(project_root: Path, path: Path) -> Path:
+    return path.resolve() if path.is_absolute() else (project_root / path).resolve()
 
 
 async def _send_notification_test(

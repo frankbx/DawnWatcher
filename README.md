@@ -12,7 +12,9 @@ trend, incremental turnover, VWAP deviation, relative volume, and market/industr
 strength. It also provides non-overlapping fixed-interval collection for unattended
 operation. Tushare `trade_cal` is cached in SQLite and gates all live collection by trading
 day and auction phase. Operational alerts can be delivered through a durable Feishu custom-bot
-worker. Strategies, decision notifications, and agents will be implemented in later phases.
+worker. A calendar-driven runtime supervisor starts and stops all intraday services without
+daily operator intervention. Strategies, decision notifications, and agents will be implemented
+in later phases.
 
 The active collector intentionally uses Tencent only. Historical Sina/Tencent rows remain
 readable in SQLite for audit purposes, but new collections do not request Sina, perform
@@ -77,6 +79,7 @@ dawnwatcher monitor check
 dawnwatcher monitor watch
 dawnwatcher notifications deliver --max-items 20
 dawnwatcher notifications watch
+dawnwatcher runtime run --project-root "$PWD"
 ```
 
 `calendar sync` downloads the current calendar year from Tushare by default and atomically
@@ -194,6 +197,44 @@ exits non-zero if a session or daily seal fails or is incomplete:
 
 ```bash
 .venv/bin/python scripts/watch_minute_sealer.py --date 2026-09-29
+```
+
+## Unattended trading-day runtime
+
+`runtime run` is the single long-lived owner of the daily service lifecycle. It reads the
+locally cached Tushare calendar (refreshing it at most once per day), does nothing on known
+non-trading days, and reconciles child processes every five seconds on an open date:
+
+- 08:50: start operational monitoring and durable Feishu outbox delivery;
+- 09:14:30: start the 15-second Tencent watcher, minute analysis, and session sealer;
+- 09:15: begin aligned 15-minute status reports;
+- 11:32: seal the morning minute partition;
+- 15:00:30: stop quote collection after the inclusive 15:00 tick;
+- 15:01: stop market-analysis and status-report processes;
+- 15:02: seal the afternoon partition and merge the whole-day Parquet file;
+- 15:15: stop operational support processes after the normal post-close drain.
+
+The supervisor uses an advisory lock so two instances cannot collect the same pool. A failed
+continuous service is restarted after ten seconds. Daily analysis/report services receive up
+to three attempts, and a terminal failure is written to the notification outbox. If the host
+or supervisor starts late, the minute sealer can catch up until 23:50. Its per-date result
+marker prevents duplicate sealing after a supervisor restart. Runtime logs are split under
+`data/reports/runtime/YYYY-MM-DD/`; the supervisor log remains under `data/reports/`.
+
+On macOS, install and immediately load the per-user launch agent once:
+
+```bash
+.venv/bin/python scripts/install_macos_launch_agent.py \
+  --project-root "$PWD"
+launchctl print "gui/$(id -u)/com.dawnwatcher.runtime"
+```
+
+The generated agent uses `RunAtLoad` and `KeepAlive`, so it restarts after a crash and starts
+again when the user logs in. The Mac must remain powered on, awake, and logged in. No token or
+Feishu secret is embedded in the plist. To stop and unload it deliberately:
+
+```bash
+launchctl bootout "gui/$(id -u)/com.dawnwatcher.runtime"
 ```
 
 `scripts/watch_market_analysis.py` runs that materialization incrementally: eight seconds after

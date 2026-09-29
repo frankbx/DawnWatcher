@@ -58,14 +58,27 @@ def test_heartbeat_alert_is_deduplicated_and_resolved(
     database_settings: Settings,
     session_factory_fixture: sessionmaker[Session],
 ) -> None:
-    now = datetime(2026, 9, 27, 2, 0, tzinfo=UTC)
-    market_status = ChinaAStockCalendar({date(2026, 9, 27): False}).status_at(now)
+    now = datetime(2026, 9, 28, 2, 0, tzinfo=UTC)
+    market_status = ChinaAStockCalendar({date(2026, 9, 28): True}).status_at(now)
     disk = lambda path: DiskUsage(10_000, 1_000, 9_000)  # noqa: E731
     settings = database_settings.model_copy(
         update={"disk_critical_free_bytes": 100, "disk_warning_free_bytes": 200}
     )
 
     with session_factory_fixture.begin() as session:
+        session.add(
+            MarketCollectionRun(
+                id="heartbeat-test-collection",
+                idempotency_key="heartbeat-test-collection",
+                expected_trade_date=market_status.trade_date,
+                market_phase=market_status.phase,
+                requested_symbols=["600000.SH"],
+                started_at=now - timedelta(seconds=2),
+                finished_at=now - timedelta(seconds=1),
+                provider_summaries={},
+                quality_counts={"complete": 1},
+            )
+        )
         first = run_operational_checks(
             session,
             settings=settings,
@@ -112,6 +125,32 @@ def test_heartbeat_alert_is_deduplicated_and_resolved(
     ]
     assert notification_count == 2
     assert alert is not None and alert.status == "resolved"
+
+
+def test_heartbeat_is_not_required_outside_trading_day_runtime(
+    database_settings: Settings,
+    session_factory_fixture: sessionmaker[Session],
+) -> None:
+    observed = datetime(2026, 9, 27, 8, 0, tzinfo=UTC)
+    market_status = ChinaAStockCalendar({date(2026, 9, 27): False}).status_at(observed)
+    settings = database_settings.model_copy(
+        update={"disk_critical_free_bytes": 100, "disk_warning_free_bytes": 200}
+    )
+
+    with session_factory_fixture.begin() as session:
+        report = run_operational_checks(
+            session,
+            settings=settings,
+            market_status=market_status,
+            observed_at=observed,
+            disk_usage=lambda path: DiskUsage(10_000, 1_000, 9_000),
+        )
+
+    assert report["checks"]["heartbeat"]["ok"] is True
+    assert report["checks"]["heartbeat"]["applicable"] is False
+    assert not any(
+        item["alert_key"] == "runtime.quote_watcher.heartbeat" for item in report["active_issues"]
+    )
 
 
 def test_active_session_collection_gap_triggers_and_recovers(

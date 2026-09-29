@@ -29,6 +29,16 @@ _MANAGED_ALERT_KEYS = {
     "market.collection.gap",
     "storage.disk.free",
 }
+_HEARTBEAT_REQUIRED_PHASES = frozenset(
+    {
+        MarketPhase.OPENING_CALL_AUCTION,
+        MarketPhase.OPENING_PAUSE,
+        MarketPhase.MORNING_CONTINUOUS,
+        MarketPhase.MIDDAY_BREAK,
+        MarketPhase.AFTERNOON_CONTINUOUS,
+        MarketPhase.CLOSING_CALL_AUCTION,
+    }
+)
 
 
 class DiskUsage(NamedTuple):
@@ -143,19 +153,32 @@ def run_operational_checks(
         .order_by(RuntimeHeartbeat.heartbeat_at.desc())
         .limit(1)
     )
+    heartbeat_applicable = (
+        market_status.calendar_date_known
+        and market_status.is_trading_day
+        and market_status.phase in _HEARTBEAT_REQUIRED_PHASES
+    )
     heartbeat_age: float | None = None
     if heartbeat is not None:
         heartbeat_age = max(0.0, (observed_at - heartbeat.heartbeat_at).total_seconds())
-    heartbeat_ok = heartbeat_age is not None and heartbeat_age <= settings.heartbeat_stale_seconds
+    heartbeat_ok = not heartbeat_applicable or (
+        heartbeat_age is not None and heartbeat_age <= settings.heartbeat_stale_seconds
+    )
     checks["heartbeat"] = {
         "ok": heartbeat_ok,
+        "applicable": heartbeat_applicable,
         "service_name": QUOTE_WATCHER_SERVICE,
         "instance_id": heartbeat.instance_id if heartbeat is not None else None,
         "last_seen_at": heartbeat.heartbeat_at.isoformat() if heartbeat is not None else None,
         "age_seconds": round(heartbeat_age, 3) if heartbeat_age is not None else None,
         "stale_after_seconds": settings.heartbeat_stale_seconds,
+        "reason": (
+            "quote watcher is required during the scheduled trading-day runtime"
+            if heartbeat_applicable
+            else "quote watcher is not required outside the scheduled trading-day runtime"
+        ),
     }
-    if not heartbeat_ok:
+    if heartbeat_applicable and not heartbeat_ok:
         issues.append(
             OperationalIssue(
                 alert_key="runtime.quote_watcher.heartbeat",
