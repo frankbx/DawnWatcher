@@ -8,10 +8,10 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from dawnwatcher.domain import JobStatus
-from dawnwatcher.ops.recovery import recover_interrupted_jobs
-from dawnwatcher.storage.models import AuditEvent, JobRun
-from dawnwatcher.workflows.job_runs import (
+from regimebeacon.domain import JobStatus
+from regimebeacon.ops.recovery import recover_interrupted_jobs
+from regimebeacon.storage.models import AuditEvent, JobRun
+from regimebeacon.workflows.job_runs import (
     InvalidJobTransition,
     create_job_run,
     transition_job,

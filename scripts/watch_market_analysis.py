@@ -11,19 +11,19 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from dawnwatcher.analysis import (
+from regimebeacon.analysis import (
     build_market_overview,
     format_market_overview_markdown,
     load_pool_members,
 )
-from dawnwatcher.config import Settings
-from dawnwatcher.notifications.feishu import (
+from regimebeacon.config import Settings
+from regimebeacon.notifications.feishu import (
     FeishuCredentials,
     FeishuWebhookClient,
     build_market_analysis_card,
 )
-from dawnwatcher.storage.database import create_database_engine, create_session_factory
-from dawnwatcher.storage.minute_features import build_minute_features
+from regimebeacon.storage.database import create_database_engine, create_session_factory
+from regimebeacon.storage.minute_features import build_minute_features
 
 
 def parse_args() -> argparse.Namespace:

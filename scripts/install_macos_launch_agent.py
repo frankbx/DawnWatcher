@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install and bootstrap the DawnWatcher unattended macOS launch agent."""
+"""Install and bootstrap the RegimeBeacon unattended macOS launch agent."""
 
 from __future__ import annotations
 
@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-_LABEL = "com.dawnwatcher.runtime"
+_LABEL = "com.regimebeacon.runtime"
+_LEGACY_LABEL = "com.dawnwatcher.runtime"
 
 
 def parse_args() -> argparse.Namespace:
@@ -52,7 +53,7 @@ def build_launch_agent(project_root: Path) -> dict[str, Any]:
         "ProgramArguments": [
             str(python),
             "-m",
-            "dawnwatcher",
+            "regimebeacon",
             "runtime",
             "run",
             "--project-root",
@@ -89,15 +90,19 @@ def bootstrap(destination: Path) -> None:
     if sys.platform != "darwin":
         raise RuntimeError("launchd installation is supported only on macOS")
     domain = f"gui/{os.getuid()}"
+    for label in (_LABEL, _LEGACY_LABEL):
+        subprocess.run(
+            ["launchctl", "bootout", f"{domain}/{label}"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
     service = f"{domain}/{_LABEL}"
-    subprocess.run(
-        ["launchctl", "bootout", service],
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
     subprocess.run(["launchctl", "bootstrap", domain, str(destination)], check=True)
     subprocess.run(["launchctl", "kickstart", "-k", service], check=True)
+    legacy_plist = Path.home() / "Library" / "LaunchAgents" / f"{_LEGACY_LABEL}.plist"
+    if legacy_plist != destination:
+        legacy_plist.unlink(missing_ok=True)
 
 
 def main() -> None:

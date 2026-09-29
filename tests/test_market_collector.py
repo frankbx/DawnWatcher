@@ -10,12 +10,12 @@ import httpx
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from dawnwatcher.config import Settings
-from dawnwatcher.domain import DataQualityState, QuoteProvider
-from dawnwatcher.market import MarketPhase
-from dawnwatcher.providers.collector import MarketDataCollector, parse_symbols, replay_archive
-from dawnwatcher.storage.market_quotes import persist_market_collection
-from dawnwatcher.storage.models import (
+from regimebeacon.config import Settings
+from regimebeacon.domain import DataQualityState, QuoteProvider
+from regimebeacon.market import MarketPhase
+from regimebeacon.providers.collector import MarketDataCollector, parse_symbols, replay_archive
+from regimebeacon.storage.market_quotes import persist_market_collection
+from regimebeacon.storage.models import (
     MarketCollectionRun,
     ProviderQuoteSnapshot,
     ReconciledQuoteSnapshot,

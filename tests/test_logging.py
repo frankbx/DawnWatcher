@@ -5,12 +5,12 @@ from __future__ import annotations
 import json
 import logging
 
-from dawnwatcher.logging import JsonFormatter
+from regimebeacon.logging import JsonFormatter
 
 
 def test_json_formatter_preserves_structured_context() -> None:
     record = logging.LogRecord(
-        name="dawnwatcher.test",
+        name="regimebeacon.test",
         level=logging.INFO,
         pathname=__file__,
         lineno=1,

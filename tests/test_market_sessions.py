@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from dawnwatcher.market import AuctionMode, ChinaAStockCalendar, MarketPhase
+from regimebeacon.market import AuctionMode, ChinaAStockCalendar, MarketPhase
 
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
 

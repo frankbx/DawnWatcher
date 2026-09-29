@@ -11,8 +11,8 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from dawnwatcher.domain import NotificationStatus
-from dawnwatcher.notifications.feishu import (
+from regimebeacon.domain import NotificationStatus
+from regimebeacon.notifications.feishu import (
     FeishuConfigurationError,
     FeishuCredentials,
     FeishuDeliveryError,
@@ -25,9 +25,9 @@ from dawnwatcher.notifications.feishu import (
     format_notification_text,
     generate_signature,
 )
-from dawnwatcher.notifications.outbox import enqueue_notification
-from dawnwatcher.notifications.worker import NotificationDeliveryWorker
-from dawnwatcher.storage.models import NotificationAttempt, NotificationOutbox
+from regimebeacon.notifications.outbox import enqueue_notification
+from regimebeacon.notifications.worker import NotificationDeliveryWorker
+from regimebeacon.storage.models import NotificationAttempt, NotificationOutbox
 
 
 def _notification() -> NotificationOutbox:
@@ -78,7 +78,7 @@ def test_signature_and_alert_message_are_deterministic() -> None:
         "fiWS2+gh28DOydAv7hzONH/mDn9+b1Y4Y5ivXWXy8vA="
     )
     message = format_notification_text(_notification())
-    assert "[DawnWatcher]" in message
+    assert "[RegimeBeacon]" in message
     assert "采集" in message
     assert "61.500 秒" in message
 
@@ -89,7 +89,7 @@ def test_alert_card_uses_schema_2_and_mobile_friendly_body() -> None:
     assert card["schema"] == "2.0"
     assert card["config"] == {"update_multi": True, "width_mode": "fill"}
     assert card["header"] == {
-        "title": {"tag": "plain_text", "content": "DawnWatcher 行情系统告警"},
+        "title": {"tag": "plain_text", "content": "RegimeBeacon 行情系统告警"},
         "template": "red",
     }
     body = card["body"]
@@ -115,7 +115,7 @@ def test_market_status_card_uses_health_colored_schema_2_card() -> None:
 
     assert healthy["schema"] == "2.0"
     assert healthy["header"]["template"] == "green"
-    assert healthy["header"]["title"]["content"] == "DawnWatcher 行情采集状态"
+    assert healthy["header"]["title"]["content"] == "RegimeBeacon 行情采集状态"
     assert healthy["body"]["elements"] == [{"tag": "markdown", "content": "**状态**：正常"}]
     assert warning["header"]["template"] == "orange"
 
@@ -127,7 +127,7 @@ def test_market_analysis_card_uses_direction_color() -> None:
     assert card["header"] == {
         "title": {
             "tag": "plain_text",
-            "content": "DawnWatcher 市场温度与15分钟概览",
+            "content": "RegimeBeacon 市场温度与15分钟概览",
         },
         "template": "red",
     }

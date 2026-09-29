@@ -9,9 +9,9 @@ import pytest
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from dawnwatcher.config import Settings
-from dawnwatcher.storage.database import create_database_engine, create_session_factory
-from dawnwatcher.storage.schema import upgrade_database
+from regimebeacon.config import Settings
+from regimebeacon.storage.database import create_database_engine, create_session_factory
+from regimebeacon.storage.schema import upgrade_database
 
 
 @pytest.fixture

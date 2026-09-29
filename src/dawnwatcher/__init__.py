@@ -1,3 +1,5 @@
-"""DawnWatcher trading-assistance platform."""
+"""Compatibility namespace for the former DawnWatcher project name."""
 
-__version__ = "0.1.0"
+from regimebeacon import __version__
+
+__all__ = ["__version__"]

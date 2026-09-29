@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from datetime import date
 
-from dawnwatcher.domain import QuoteProvider, QuoteSymbol
-from dawnwatcher.providers.tencent import TencentQuoteAdapter
-from dawnwatcher.reconciliation.validation import validate_quote
+from regimebeacon.domain import QuoteProvider, QuoteSymbol
+from regimebeacon.providers.tencent import TencentQuoteAdapter
+from regimebeacon.reconciliation.validation import validate_quote
 from tests.quote_samples import raw_batch, tencent_line
 
 

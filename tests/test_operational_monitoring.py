@@ -7,16 +7,16 @@ from datetime import UTC, date, datetime, timedelta
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from dawnwatcher.config import Settings
-from dawnwatcher.market import ChinaAStockCalendar, MarketPhase
-from dawnwatcher.ops.monitoring import (
+from regimebeacon.config import Settings
+from regimebeacon.market import ChinaAStockCalendar, MarketPhase
+from regimebeacon.ops.monitoring import (
     DiskUsage,
     run_operational_checks,
     start_runtime_heartbeat,
     stop_runtime_heartbeat,
     touch_runtime_heartbeat,
 )
-from dawnwatcher.storage.models import (
+from regimebeacon.storage.models import (
     MarketCollectionRun,
     NotificationOutbox,
     OperationalAlert,

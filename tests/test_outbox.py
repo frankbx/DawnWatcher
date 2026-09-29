@@ -8,8 +8,8 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from dawnwatcher.domain import NotificationStatus
-from dawnwatcher.notifications.outbox import (
+from regimebeacon.domain import NotificationStatus
+from regimebeacon.notifications.outbox import (
     NotificationClaimError,
     claim_next_notification,
     enqueue_notification,
@@ -17,7 +17,7 @@ from dawnwatcher.notifications.outbox import (
     mark_notification_sent,
     recover_stale_notifications,
 )
-from dawnwatcher.storage.models import NotificationAttempt, NotificationOutbox
+from regimebeacon.storage.models import NotificationAttempt, NotificationOutbox
 
 
 def test_enqueue_is_idempotent_and_success_is_auditable(

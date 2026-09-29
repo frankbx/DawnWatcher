@@ -9,9 +9,9 @@ from pathlib import Path
 
 import httpx
 
-from dawnwatcher.config import Settings
-from dawnwatcher.diagnostics.comparison import DiagnosticComparisonRunner
-from dawnwatcher.providers.collector import parse_symbols
+from regimebeacon.config import Settings
+from regimebeacon.diagnostics.comparison import DiagnosticComparisonRunner
+from regimebeacon.providers.collector import parse_symbols
 from tests.quote_samples import tencent_line
 
 

@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from dawnwatcher.workflows.interval import FixedIntervalScheduler
+from regimebeacon.workflows.interval import FixedIntervalScheduler
 
 
 def test_scheduler_runs_jobs_without_overlap_and_skips_missed_slots() -> None:

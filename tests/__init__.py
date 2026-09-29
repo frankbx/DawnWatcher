@@ -1,1 +1,1 @@
-"""DawnWatcher test suite."""
+"""RegimeBeacon test suite."""

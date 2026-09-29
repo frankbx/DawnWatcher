@@ -8,9 +8,9 @@ from pathlib import Path
 
 from sqlalchemy import Engine, MetaData, select
 
-from dawnwatcher.config import Settings
-from dawnwatcher.storage.database import create_database_engine
-from dawnwatcher.storage.schema import inspect_schema, upgrade_database
+from regimebeacon.config import Settings
+from regimebeacon.storage.database import create_database_engine
+from regimebeacon.storage.schema import inspect_schema, upgrade_database
 
 
 def test_migration_applies_expected_schema(

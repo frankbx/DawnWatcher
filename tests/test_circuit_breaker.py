@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dawnwatcher.providers.circuit_breaker import CircuitBreaker, CircuitState
+from regimebeacon.providers.circuit_breaker import CircuitBreaker, CircuitState
 
 
 def test_circuit_opens_and_allows_one_probe_after_cooldown() -> None:

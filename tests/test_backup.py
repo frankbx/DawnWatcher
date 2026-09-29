@@ -9,9 +9,9 @@ from pathlib import Path
 import pytest
 from sqlalchemy.orm import Session, sessionmaker
 
-from dawnwatcher.config import Settings
-from dawnwatcher.storage.backup import online_backup, sqlite_integrity_check
-from dawnwatcher.workflows.job_runs import create_job_run
+from regimebeacon.config import Settings
+from regimebeacon.storage.backup import online_backup, sqlite_integrity_check
+from regimebeacon.workflows.job_runs import create_job_run
 
 
 def test_online_backup_is_complete_and_verified(

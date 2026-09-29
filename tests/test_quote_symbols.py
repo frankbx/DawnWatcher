@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from dawnwatcher.domain import Exchange, QuoteSymbol
-from dawnwatcher.providers.collector import parse_symbols
+from regimebeacon.domain import Exchange, QuoteSymbol
+from regimebeacon.providers.collector import parse_symbols
 
 
 @pytest.mark.parametrize(

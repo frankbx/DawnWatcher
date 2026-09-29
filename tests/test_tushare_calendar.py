@@ -10,7 +10,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from dawnwatcher.providers.tushare_calendar import (
+from regimebeacon.providers.tushare_calendar import (
     TushareAPIError,
     TushareCalendarClient,
     read_tushare_token,

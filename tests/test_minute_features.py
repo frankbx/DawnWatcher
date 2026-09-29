@@ -10,9 +10,9 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from dawnwatcher.domain import DataQualityState, Exchange, QuoteProvider
-from dawnwatcher.storage.minute_features import build_minute_features, list_minute_features
-from dawnwatcher.storage.models import (
+from regimebeacon.domain import DataQualityState, Exchange, QuoteProvider
+from regimebeacon.storage.minute_features import build_minute_features, list_minute_features
+from regimebeacon.storage.models import (
     MarketCollectionRun,
     MinuteBar,
     MinuteFeature,

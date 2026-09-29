@@ -8,9 +8,9 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session, sessionmaker
 
-from dawnwatcher.market import MarketPhase, TradingCalendarRecord
-from dawnwatcher.market.gate import TushareTradingSessionGate
-from dawnwatcher.storage.trading_calendar import upsert_calendar_records
+from regimebeacon.market import MarketPhase, TradingCalendarRecord
+from regimebeacon.market.gate import TushareTradingSessionGate
+from regimebeacon.storage.trading_calendar import upsert_calendar_records
 
 
 def test_fresh_cached_date_does_not_require_token_file(

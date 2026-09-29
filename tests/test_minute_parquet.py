@@ -12,14 +12,14 @@ from zoneinfo import ZoneInfo
 import pytest
 from sqlalchemy.orm import Session, sessionmaker
 
-from dawnwatcher.domain import Exchange, QuoteProvider
-from dawnwatcher.storage.minute_parquet import (
+from regimebeacon.domain import Exchange, QuoteProvider
+from regimebeacon.storage.minute_parquet import (
     InstrumentMetadata,
     MinuteTradingSession,
     merge_minute_day,
     seal_minute_session,
 )
-from dawnwatcher.storage.models import MinuteBar, MinuteFeature
+from regimebeacon.storage.models import MinuteBar, MinuteFeature
 
 pq = pytest.importorskip("pyarrow.parquet")
 
@@ -81,6 +81,7 @@ def test_seals_complete_afternoon_partition_atomically(
     assert manifest["parquet_sha256"] == _sha256(parquet_path)
     table = pq.ParquetFile(parquet_path).read()
     assert table.num_rows == 240
+    assert table.schema.metadata[b"regimebeacon.schema_version"] == b"1"
     assert table.schema.metadata[b"dawnwatcher.schema_version"] == b"1"
     assert "industry_l1" in table.column_names
 

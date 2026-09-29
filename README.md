@@ -1,6 +1,6 @@
-# DawnWatcher
+# RegimeBeacon
 
-DawnWatcher is a deterministic, auditable trading-assistance platform. It combines
+RegimeBeacon is a deterministic, auditable trading-assistance platform. It combines
 Tencent intraday market monitoring and Feishu operational alerts, and will add post-close workflows and
 narrowly scoped language-model agents.
 
@@ -52,35 +52,39 @@ never included in logs or configuration output.
 ## Commands
 
 ```bash
-dawnwatcher --help
-dawnwatcher doctor
-dawnwatcher config
-dawnwatcher db upgrade
-dawnwatcher db check
-dawnwatcher db recover
-dawnwatcher db backup
-dawnwatcher calendar sync
-dawnwatcher calendar status
-dawnwatcher quotes collect 600000.SH 000001.SZ
-dawnwatcher quotes watch 600000.SH 000001.SZ
-dawnwatcher quotes watch 600000.SH 000001.SZ --interval 30 --max-runs 10
-dawnwatcher quotes compare 600000.SH 000001.SZ --interval 15 \
+regimebeacon --help
+regimebeacon doctor
+regimebeacon config
+regimebeacon db upgrade
+regimebeacon db check
+regimebeacon db recover
+regimebeacon db backup
+regimebeacon calendar sync
+regimebeacon calendar status
+regimebeacon quotes collect 600000.SH 000001.SZ
+regimebeacon quotes watch 600000.SH 000001.SZ
+regimebeacon quotes watch 600000.SH 000001.SZ --interval 30 --max-runs 10
+regimebeacon quotes compare 600000.SH 000001.SZ --interval 15 \
   --until 2026-09-28T15:00:00+08:00
-dawnwatcher quotes stats --date 2026-09-28
-dawnwatcher quotes replay data/raw/quotes/YYYY-MM-DD/tencent/example.json.gz \
+regimebeacon quotes stats --date 2026-09-28
+regimebeacon quotes replay data/raw/quotes/YYYY-MM-DD/tencent/example.json.gz \
   --expected-date 2026-09-24
-dawnwatcher features build 600000.SH --date 2026-09-28 \
+regimebeacon features build 600000.SH --date 2026-09-28 \
   --market-benchmark 000001.SH --industry-map industry-benchmarks.json
-dawnwatcher features show --date 2026-09-28 --symbol 600000.SH
-dawnwatcher features seal --date 2026-09-28 --session morning
-dawnwatcher features seal --date 2026-09-28 --session afternoon
-dawnwatcher features merge-day --date 2026-09-28
-dawnwatcher monitor check
-dawnwatcher monitor watch
-dawnwatcher notifications deliver --max-items 20
-dawnwatcher notifications watch
-dawnwatcher runtime run --project-root "$PWD"
+regimebeacon features show --date 2026-09-28 --symbol 600000.SH
+regimebeacon features seal --date 2026-09-28 --session morning
+regimebeacon features seal --date 2026-09-28 --session afternoon
+regimebeacon features merge-day --date 2026-09-28
+regimebeacon monitor check
+regimebeacon monitor watch
+regimebeacon notifications deliver --max-items 20
+regimebeacon notifications watch
+regimebeacon runtime run --project-root "$PWD"
 ```
+
+`regimebeacon` is the canonical command. The former `dawnwatcher` command and
+`DAWNWATCHER_*` environment variables remain accepted as migration aliases; new
+configuration should use the `REGIMEBEACON_*` prefix shown in `.env.example`.
 
 `calendar sync` downloads the current calendar year from Tushare by default and atomically
 upserts all natural dates into SQLite. Explicit `--start-date` and `--end-date` ranges are also
@@ -98,7 +102,7 @@ the Tushare form.
 
 `quotes watch` starts immediately and then collects on a configurable fixed cadence. The
 default interval is 15 seconds and can be changed with
-`DAWNWATCHER_MARKET_POLL_INTERVAL_SECONDS` or overridden for one process with `--interval`.
+`REGIMEBEACON_MARKET_POLL_INTERVAL_SECONDS` or overridden for one process with `--interval`.
 Runs never overlap: if collection exceeds the interval, elapsed schedule slots are skipped.
 The process handles SIGINT and SIGTERM cleanly. `--max-runs` is useful for bounded smoke tests;
 without it, the process continues until a stop signal arrives.
@@ -226,7 +230,7 @@ On macOS, install and immediately load the per-user launch agent once:
 ```bash
 .venv/bin/python scripts/install_macos_launch_agent.py \
   --project-root "$PWD"
-launchctl print "gui/$(id -u)/com.dawnwatcher.runtime"
+launchctl print "gui/$(id -u)/com.regimebeacon.runtime"
 ```
 
 The generated agent uses `RunAtLoad` and `KeepAlive`, so it restarts after a crash and starts
@@ -234,7 +238,7 @@ again when the user logs in. The Mac must remain powered on, awake, and logged i
 Feishu secret is embedded in the plist. To stop and unload it deliberately:
 
 ```bash
-launchctl bootout "gui/$(id -u)/com.dawnwatcher.runtime"
+launchctl bootout "gui/$(id -u)/com.regimebeacon.runtime"
 ```
 
 `scripts/watch_market_analysis.py` runs that materialization incrementally: eight seconds after
@@ -278,8 +282,8 @@ included in logs, public configuration, or database error messages.
 
 Defaults are a 30-second monitor cadence, a 60-second stale-heartbeat threshold, a 60-second
 collection-gap threshold, a 5 GiB disk warning, and a 1 GiB disk critical alert. They can be
-changed with the corresponding `DAWNWATCHER_MONITOR_*`, `DAWNWATCHER_HEARTBEAT_*`,
-`DAWNWATCHER_COLLECTION_GAP_*`, and `DAWNWATCHER_DISK_*` settings shown in `.env.example`.
+changed with the corresponding `REGIMEBEACON_MONITOR_*`, `REGIMEBEACON_HEARTBEAT_*`,
+`REGIMEBEACON_COLLECTION_GAP_*`, and `REGIMEBEACON_DISK_*` settings shown in `.env.example`.
 
 ## Quality checks
 

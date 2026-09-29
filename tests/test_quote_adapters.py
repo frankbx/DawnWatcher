@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from dawnwatcher.domain import QuoteProvider, QuoteSymbol
-from dawnwatcher.providers.tencent import TencentQuoteAdapter
+from regimebeacon.domain import QuoteProvider, QuoteSymbol
+from regimebeacon.providers.tencent import TencentQuoteAdapter
 from tests.quote_samples import raw_batch, tencent_line
 
 

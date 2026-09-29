@@ -14,16 +14,16 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 
-from dawnwatcher.config import Settings
-from dawnwatcher.notifications.feishu import (
+from regimebeacon.config import Settings
+from regimebeacon.notifications.feishu import (
     FeishuCredentials,
     FeishuWebhookClient,
     build_market_status_card,
 )
-from dawnwatcher.ops.monitoring import QUOTE_WATCHER_SERVICE
-from dawnwatcher.storage.database import create_database_engine, create_session_factory
-from dawnwatcher.storage.market_metrics import build_market_metrics_report
-from dawnwatcher.storage.models import RuntimeHeartbeat
+from regimebeacon.ops.monitoring import QUOTE_WATCHER_SERVICE
+from regimebeacon.storage.database import create_database_engine, create_session_factory
+from regimebeacon.storage.market_metrics import build_market_metrics_report
+from regimebeacon.storage.models import RuntimeHeartbeat
 
 
 def parse_args() -> argparse.Namespace:

@@ -9,13 +9,13 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session, sessionmaker
 
-from dawnwatcher.analysis.market_overview import (
+from regimebeacon.analysis.market_overview import (
     PoolMember,
     build_market_overview,
     format_market_overview_markdown,
 )
-from dawnwatcher.domain import Exchange, QuoteProvider
-from dawnwatcher.storage.models import (
+from regimebeacon.domain import Exchange, QuoteProvider
+from regimebeacon.storage.models import (
     MarketCollectionRun,
     MinuteBar,
     MinuteFeature,

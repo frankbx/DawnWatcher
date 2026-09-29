@@ -6,10 +6,10 @@ from datetime import UTC, date, datetime, timedelta
 
 from sqlalchemy.orm import Session, sessionmaker
 
-from dawnwatcher.domain import DataQualityState, Exchange, QuoteProvider
-from dawnwatcher.market import MarketPhase
-from dawnwatcher.storage.market_metrics import build_market_metrics_report
-from dawnwatcher.storage.models import MarketCollectionRun, ReconciledQuoteSnapshot
+from regimebeacon.domain import DataQualityState, Exchange, QuoteProvider
+from regimebeacon.market import MarketPhase
+from regimebeacon.storage.market_metrics import build_market_metrics_report
+from regimebeacon.storage.models import MarketCollectionRun, ReconciledQuoteSnapshot
 
 
 def test_market_metrics_aggregate_single_source_latency_and_gaps(

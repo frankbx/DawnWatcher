@@ -8,9 +8,9 @@ from zoneinfo import ZoneInfo
 
 from scripts.install_macos_launch_agent import build_launch_agent
 
-from dawnwatcher.config import Settings
-from dawnwatcher.market import ChinaAStockCalendar
-from dawnwatcher.runtime import RuntimeServicePlan, build_runtime_service_plans
+from regimebeacon.config import Settings
+from regimebeacon.market import ChinaAStockCalendar
+from regimebeacon.runtime import RuntimeServicePlan, build_runtime_service_plans
 
 _ZONE = ZoneInfo("Asia/Shanghai")
 _TRADE_DATE = date(2026, 9, 30)
@@ -93,7 +93,7 @@ def test_macos_launch_agent_runs_one_keepalive_supervisor(tmp_path: Path) -> Non
     assert payload["RunAtLoad"] is True
     assert payload["KeepAlive"] is True
     assert payload["WorkingDirectory"] == str(tmp_path.resolve())
-    assert payload["ProgramArguments"][1:4] == ["-m", "dawnwatcher", "runtime"]
+    assert payload["ProgramArguments"][1:4] == ["-m", "regimebeacon", "runtime"]
     assert "token" not in " ".join(payload["ProgramArguments"])
 
 

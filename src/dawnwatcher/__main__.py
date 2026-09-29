@@ -1,6 +1,6 @@
-"""Run DawnWatcher with ``python -m dawnwatcher``."""
+"""Run the legacy CLI alias with ``python -m dawnwatcher``."""
 
-from dawnwatcher.cli import main
+from regimebeacon.cli import main
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()

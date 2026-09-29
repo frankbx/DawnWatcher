@@ -11,10 +11,10 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from dawnwatcher.config import Settings
-from dawnwatcher.storage.database import create_database_engine, create_session_factory
-from dawnwatcher.storage.minute_features import build_minute_features
-from dawnwatcher.storage.minute_parquet import (
+from regimebeacon.config import Settings
+from regimebeacon.storage.database import create_database_engine, create_session_factory
+from regimebeacon.storage.minute_features import build_minute_features
+from regimebeacon.storage.minute_parquet import (
     MinuteTradingSession,
     load_instrument_metadata,
     merge_minute_day,

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from dawnwatcher.domain import QuoteProvider, QuoteSymbol
-from dawnwatcher.domain.quotes import RawQuoteBatch
+from regimebeacon.domain import QuoteProvider, QuoteSymbol
+from regimebeacon.domain.quotes import RawQuoteBatch
 
 
 def tencent_line(

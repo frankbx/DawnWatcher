@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from dawnwatcher.cli import build_parser, main
+from regimebeacon.cli import build_parser, main
 
 
 def test_cli_without_command_prints_help(capsys: object) -> None:
@@ -22,7 +22,7 @@ def test_doctor_creates_runtime_directories(
     tmp_path: Path,
     capsys: object,
 ) -> None:
-    monkeypatch.setenv("DAWNWATCHER_DATA_DIR", str(tmp_path))  # type: ignore[attr-defined]
+    monkeypatch.setenv("REGIMEBEACON_DATA_DIR", str(tmp_path))  # type: ignore[attr-defined]
 
     assert main(["doctor"]) == 0
     output = capsys.readouterr().out  # type: ignore[attr-defined]
@@ -39,8 +39,8 @@ def test_config_uses_environment_overrides(
     tmp_path: Path,
     capsys: object,
 ) -> None:
-    monkeypatch.setenv("DAWNWATCHER_ENVIRONMENT", "test")  # type: ignore[attr-defined]
-    monkeypatch.setenv("DAWNWATCHER_DATA_DIR", str(tmp_path))  # type: ignore[attr-defined]
+    monkeypatch.setenv("REGIMEBEACON_ENVIRONMENT", "test")  # type: ignore[attr-defined]
+    monkeypatch.setenv("REGIMEBEACON_DATA_DIR", str(tmp_path))  # type: ignore[attr-defined]
 
     assert main(["config"]) == 0
     output = capsys.readouterr().out  # type: ignore[attr-defined]
@@ -154,7 +154,7 @@ def test_unattended_runtime_command_parses() -> None:
             "runtime",
             "run",
             "--project-root",
-            "/tmp/dawnwatcher",
+            "/tmp/regimebeacon",
             "--poll-interval",
             "10",
             "--max-cycles",
@@ -162,6 +162,6 @@ def test_unattended_runtime_command_parses() -> None:
         ]
     )
 
-    assert args.project_root == Path("/tmp/dawnwatcher")
+    assert args.project_root == Path("/tmp/regimebeacon")
     assert args.poll_interval == 10
     assert args.max_cycles == 1

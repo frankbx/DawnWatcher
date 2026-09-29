@@ -6,8 +6,8 @@ from datetime import UTC, date, datetime
 
 from sqlalchemy.orm import Session, sessionmaker
 
-from dawnwatcher.market import MarketPhase, TradingCalendarRecord
-from dawnwatcher.storage.trading_calendar import (
+from regimebeacon.market import MarketPhase, TradingCalendarRecord
+from regimebeacon.storage.trading_calendar import (
     calendar_coverage,
     load_market_calendar,
     upsert_calendar_records,
