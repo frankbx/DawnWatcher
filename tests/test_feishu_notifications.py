@@ -19,6 +19,8 @@ from dawnwatcher.notifications.feishu import (
     FeishuDeliveryReceipt,
     FeishuWebhookClient,
     build_alert_card,
+    build_market_analysis_card,
+    build_market_status_card,
     build_text_card,
     format_notification_text,
     generate_signature,
@@ -105,6 +107,33 @@ def test_text_card_normalizes_and_validates_message() -> None:
     assert card["body"] == {"elements": [{"tag": "markdown", "content": "旺财旺财"}]}
     with pytest.raises(ValueError, match="cannot be empty"):
         build_text_card(" \n")
+
+
+def test_market_status_card_uses_health_colored_schema_2_card() -> None:
+    healthy = build_market_status_card("**状态**：正常", healthy=True)
+    warning = build_market_status_card("**状态**：需关注", healthy=False)
+
+    assert healthy["schema"] == "2.0"
+    assert healthy["header"]["template"] == "green"
+    assert healthy["header"]["title"]["content"] == "DawnWatcher 行情采集状态"
+    assert healthy["body"]["elements"] == [{"tag": "markdown", "content": "**状态**：正常"}]
+    assert warning["header"]["template"] == "orange"
+
+
+def test_market_analysis_card_uses_direction_color() -> None:
+    card = build_market_analysis_card("**市场状态**：偏弱", direction="偏弱")
+
+    assert card["schema"] == "2.0"
+    assert card["header"] == {
+        "title": {
+            "tag": "plain_text",
+            "content": "DawnWatcher 市场温度与15分钟概览",
+        },
+        "template": "red",
+    }
+
+    risk_card = build_market_analysis_card("**市场温度**：风险收缩", direction="风险收缩")
+    assert risk_card["header"]["template"] == "red"
 
 
 def test_feishu_client_sends_signed_card_message() -> None:

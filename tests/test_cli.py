@@ -30,7 +30,7 @@ def test_doctor_creates_runtime_directories(
 
     assert report["status"] == "ok"
     assert report["writable"] is True
-    for name in ("db", "raw", "reports", "backups"):
+    for name in ("db", "raw", "reports", "backups", "lake"):
         assert (tmp_path / name).is_dir()
 
 
@@ -100,3 +100,49 @@ def test_notification_worker_commands_parse() -> None:
     assert deliver.max_items == 5
     assert watch.interval_seconds == 10.0
     assert watch.max_runs == 2
+
+
+def test_minute_feature_commands_parse() -> None:
+    build = build_parser().parse_args(
+        [
+            "features",
+            "build",
+            "600000.SH",
+            "--date",
+            "2026-09-28",
+            "--market-benchmark",
+            "000001.SH",
+            "--lookback-days",
+            "10",
+            "--minimum-history-days",
+            "3",
+        ]
+    )
+    show = build_parser().parse_args(
+        ["features", "show", "--date", "2026-09-28", "--symbol", "600000.SH"]
+    )
+    seal = build_parser().parse_args(
+        [
+            "features",
+            "seal",
+            "--date",
+            "2026-09-28",
+            "--session",
+            "afternoon",
+            "--output-root",
+            "custom-lake",
+        ]
+    )
+    merge_day = build_parser().parse_args(
+        ["features", "merge-day", "--date", "2026-09-28", "--output-root", "daily-lake"]
+    )
+
+    assert build.symbols == ["600000.SH"]
+    assert build.market_benchmark == "000001.SH"
+    assert build.lookback_days == 10
+    assert build.minimum_history_days == 3
+    assert show.symbol == "600000.SH"
+    assert seal.trading_session == "afternoon"
+    assert seal.output_root == Path("custom-lake")
+    assert merge_day.date.isoformat() == "2026-09-28"
+    assert merge_day.output_root == Path("daily-lake")

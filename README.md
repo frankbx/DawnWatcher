@@ -4,10 +4,12 @@ DawnWatcher is a deterministic, auditable trading-assistance platform. It combin
 Tencent intraday market monitoring and Feishu operational alerts, and will add post-close workflows and
 narrowly scoped language-model agents.
 
-The project is currently at **Phase 2: single-source market data foundation**. In addition to
+The project is currently at **Phase 2: single-source market data and feature foundation**. In addition to
 the durable Phase 1 foundation, it collects A-share snapshots from Tencent, validates them,
 archives the exact raw responses, replays archives offline, and persists auditable snapshots
-in SQLite. It also provides non-overlapping fixed-interval collection for unattended
+in SQLite. Persisted snapshots can be aggregated into auditable one-minute bars with price
+trend, incremental turnover, VWAP deviation, relative volume, and market/industry relative
+strength. It also provides non-overlapping fixed-interval collection for unattended
 operation. Tushare `trade_cal` is cached in SQLite and gates all live collection by trading
 day and auction phase. Operational alerts can be delivered through a durable Feishu custom-bot
 worker. Strategies, decision notifications, and agents will be implemented in later phases.
@@ -32,6 +34,12 @@ it does not write market snapshots to the production tables.
 python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e '.[dev]'
+```
+
+Install the optional Parquet writer when this host is responsible for minute-data sealing:
+
+```bash
+python -m pip install -e '.[dev,parquet]'
 ```
 
 Copy `.env.example` to `.env` only when local overrides are needed. Defaults are safe for
@@ -59,6 +67,12 @@ dawnwatcher quotes compare 600000.SH 000001.SZ --interval 15 \
 dawnwatcher quotes stats --date 2026-09-28
 dawnwatcher quotes replay data/raw/quotes/YYYY-MM-DD/tencent/example.json.gz \
   --expected-date 2026-09-24
+dawnwatcher features build 600000.SH --date 2026-09-28 \
+  --market-benchmark 000001.SH --industry-map industry-benchmarks.json
+dawnwatcher features show --date 2026-09-28 --symbol 600000.SH
+dawnwatcher features seal --date 2026-09-28 --session morning
+dawnwatcher features seal --date 2026-09-28 --session afternoon
+dawnwatcher features merge-day --date 2026-09-28
 dawnwatcher monitor check
 dawnwatcher monitor watch
 dawnwatcher notifications deliver --max-items 20
@@ -122,6 +136,85 @@ strategy code.
 average/p50/p95/max collection latency, circuit-open and circuit-suppression counts,
 quality-state counts, and within-session collection gaps. Historical dual-source rows are
 reported separately and do not contaminate current single-source metrics.
+
+`features build` is an idempotent materialization step over validated Tencent snapshots. It
+creates `minute_bar` and `minute_feature` rows; rerunning it updates the same provider/symbol/
+minute keys. The formulas are:
+
+- one-minute trend: `(minute close / minute open - 1) * 10,000` basis points;
+- incremental volume and amount: last cumulative value in the minute minus the previous
+  available snapshot's cumulative value;
+- minute VWAP: incremental amount divided by incremental shares, with VWAP deviation as
+  `(minute close / minute VWAP - 1) * 10,000` basis points;
+- relative volume: current incremental shares divided by the mean for the same local clock
+  minute over up to 20 preceding stored dates, emitted only after five dates by default;
+- relative strength: the stock's one-minute trend minus the matching market or industry
+  benchmark trend.
+
+The market benchmark and every industry benchmark must be included in `quotes watch`, or the
+corresponding strength is stored as null with a quality flag. An industry mapping file is a
+JSON object such as:
+
+```json
+{
+  "600000.SH": "512800.SH",
+  "000001.SZ": "512800.SH"
+}
+```
+
+Index and ETF Tushare codes such as `000001.SH`, `399001.SZ`, `510300.SH`, and `159915.SZ`
+are accepted. Missing cumulative baselines, resets, low sample coverage, insufficient history,
+and absent benchmark bars never become zero-valued signals; they remain null and are recorded
+in `quality_flags`. Use `--interval` if the source snapshots were not collected at the default
+15-second cadence. The build command may be run after each completed minute for intraday use
+and rerun after the close to finalize the day.
+
+`features seal` writes a sealed analytical partition after a trading session has ended.
+The wide rows combine the minute OHLC/turnover data, derived features, and stable stock-pool
+labels. Output is partitioned as
+`data/lake/minute_market/trade_date=YYYY-MM-DD/session={morning,afternoon}`. Each partition
+contains `part-000.parquet` plus `manifest.json`, which records the schema version, expected
+and actual symbol/minute coverage, missing features, file size, and SHA-256 checksum. Parquet
+is written to a temporary file, read back for row-count validation, synced, and atomically
+renamed. The manifest is published only after the data file succeeds. A session with gaps is
+still retained for audit with `complete: false`, and the CLI returns status 3; an active
+session cannot be sealed.
+
+After the afternoon partition is sealed, `features merge-day` validates both session
+manifests and checksums and publishes a single
+`data/lake/minute_market/trade_date=YYYY-MM-DD/day.parquet` file with
+`day-manifest.json`. Morning and afternoon rows retain their `session` and `market_phase`
+columns. The two session partitions remain as recovery checkpoints. If either source session
+is incomplete, the daily file is still auditable but is also marked `complete: false`.
+
+For unattended session-close operation, run the wrapper below under the same process
+supervisor as the collectors. It rebuilds the final minute features, seals the morning
+partition at 11:32 and the afternoon partition at 15:02, then publishes `day.parquet`. It
+exits non-zero if a session or daily seal fails or is incomplete:
+
+```bash
+.venv/bin/python scripts/watch_minute_sealer.py --date 2026-09-29
+```
+
+`scripts/watch_market_analysis.py` runs that materialization incrementally: eight seconds after
+each wall-clock minute it rebuilds only the just-completed minute, using the preceding minute as
+the cumulative volume/amount baseline. On each 15-minute boundary it sends a Feishu Card JSON
+2.0 overview containing an auditable intraday market temperature, the 沪深300 rolling return,
+daily and rolling breadth for the 320 fixed representative stocks, and ranked sector strength
+confirmed by configured industry ETFs. Temperature combines daily and rolling sample breadth
+with benchmark/sample returns; same-clock relative volume raises confidence and distinguishes
+extreme states but never supplies direction by itself. Around 09:45 the card also labels whether
+the opening gap is being confirmed or reversed and treats that result as a risk adjustment, not
+an independent buy signal. The 40 dynamic observers are excluded from breadth to avoid selection
+bias. Sector warming/cooling compares the current 15-minute window with the preceding window;
+missing history, partial ETF proxies, and sample-only breadth remain explicit in the output.
+
+For a bounded intraday run:
+
+```bash
+.venv/bin/python scripts/watch_market_analysis.py \
+  --until 2026-09-29T15:00:00+08:00
+```
 
 `quotes watch` writes a durable heartbeat on every scheduler tick and after every collection.
 Run `monitor watch` as a separate supervised process so a dead or stalled quote watcher can be

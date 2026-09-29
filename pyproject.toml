@@ -23,6 +23,13 @@ dev = [
     "pytest-cov>=6,<8",
     "ruff>=0.11,<1",
 ]
+stock-pool = [
+    "pandas>=2.2,<4",
+    "tushare>=1.4,<2",
+]
+parquet = [
+    "pyarrow>=25,<26",
+]
 
 [project.scripts]
 dawnwatcher = "dawnwatcher.cli:main"

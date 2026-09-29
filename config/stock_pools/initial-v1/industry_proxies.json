@@ -1,0 +1,144 @@
+{
+  "as_of_trade_date": "2026-09-28",
+  "source_industry_classification": "申万行业分类2021版（Tushare SW2021）",
+  "proxies": {
+    "农林牧渔": {
+      "ts_code": "159825.SZ",
+      "proxy_quality": "direct",
+      "reason": "行业代理：覆盖农业主题，用作申万一级「农林牧渔」相对强弱基准。"
+    },
+    "基础化工": {
+      "ts_code": "159870.SZ",
+      "proxy_quality": "direct",
+      "reason": "行业代理：覆盖细分化工产业，用作申万一级「基础化工」相对强弱基准。"
+    },
+    "钢铁": {
+      "ts_code": "515210.SH",
+      "proxy_quality": "direct",
+      "reason": "行业代理：覆盖钢铁产业，用作申万一级「钢铁」相对强弱基准。"
+    },
+    "有色金属": {
+      "ts_code": "512400.SH",
+      "proxy_quality": "direct",
+      "reason": "行业代理：跟踪申万有色金属，用作「有色金属」相对强弱基准。"
+    },
+    "电子": {
+      "ts_code": "159997.SZ",
+      "proxy_quality": "direct",
+      "reason": "行业代理：覆盖电子产业，用作申万一级「电子」相对强弱基准。"
+    },
+    "家用电器": {
+      "ts_code": "159328.SZ",
+      "proxy_quality": "direct",
+      "reason": "行业代理：覆盖家电龙头，用作申万一级「家用电器」相对强弱基准。"
+    },
+    "食品饮料": {
+      "ts_code": "515170.SH",
+      "proxy_quality": "direct",
+      "reason": "行业代理：覆盖细分食品饮料产业，用作「食品饮料」相对强弱基准。"
+    },
+    "医药生物": {
+      "ts_code": "512010.SH",
+      "proxy_quality": "partial",
+      "reason": "行业近似代理：覆盖沪深300医药卫生成份，用作「医药生物」方向参考；对中小市值覆盖有限。"
+    },
+    "公用事业": {
+      "ts_code": "159611.SZ",
+      "proxy_quality": "partial",
+      "reason": "行业近似代理：覆盖电力公用事业，用作「公用事业」方向参考；不完整覆盖燃气等子行业。"
+    },
+    "交通运输": {
+      "ts_code": "159662.SZ",
+      "proxy_quality": "direct",
+      "reason": "行业代理：覆盖交通运输行业，用作申万一级「交通运输」相对强弱基准。"
+    },
+    "房地产": {
+      "ts_code": "512200.SH",
+      "proxy_quality": "direct",
+      "reason": "行业代理：覆盖全指房地产，用作申万一级「房地产」相对强弱基准。"
+    },
+    "社会服务": {
+      "ts_code": "159766.SZ",
+      "proxy_quality": "partial",
+      "reason": "行业近似代理：旅游主题可反映部分社会服务景气；不代表教育、人力服务等全部子行业。"
+    },
+    "建筑材料": {
+      "ts_code": "159745.SZ",
+      "proxy_quality": "direct",
+      "reason": "行业代理：覆盖全指建筑材料，用作申万一级「建筑材料」相对强弱基准。"
+    },
+    "建筑装饰": {
+      "ts_code": "159635.SZ",
+      "proxy_quality": "partial",
+      "reason": "行业近似代理：基建主题覆盖建筑装饰主要权重；对装修装饰等子行业覆盖有限。"
+    },
+    "电力设备": {
+      "ts_code": "516160.SH",
+      "proxy_quality": "partial",
+      "reason": "行业近似代理：新能源主题覆盖电力设备主要方向；并非完整申万行业复制。"
+    },
+    "国防军工": {
+      "ts_code": "512660.SH",
+      "proxy_quality": "direct",
+      "reason": "行业代理：覆盖军工产业，用作申万一级「国防军工」相对强弱基准。"
+    },
+    "计算机": {
+      "ts_code": "159998.SZ",
+      "proxy_quality": "direct",
+      "reason": "行业代理：覆盖计算机主题，用作申万一级「计算机」相对强弱基准。"
+    },
+    "传媒": {
+      "ts_code": "512980.SH",
+      "proxy_quality": "direct",
+      "reason": "行业代理：覆盖传媒产业，用作申万一级「传媒」相对强弱基准。"
+    },
+    "通信": {
+      "ts_code": "515880.SH",
+      "proxy_quality": "partial",
+      "reason": "行业近似代理：覆盖通信设备，用作「通信」方向参考；运营商等覆盖可能不足。"
+    },
+    "银行": {
+      "ts_code": "512800.SH",
+      "proxy_quality": "direct",
+      "reason": "行业代理：覆盖中证银行，用作申万一级「银行」相对强弱基准。"
+    },
+    "非银金融": {
+      "ts_code": "512070.SH",
+      "proxy_quality": "direct",
+      "reason": "行业代理：覆盖沪深300非银行金融，用作「非银金融」相对强弱基准。"
+    },
+    "汽车": {
+      "ts_code": "159512.SZ",
+      "proxy_quality": "direct",
+      "reason": "行业代理：覆盖全指汽车，用作申万一级「汽车」相对强弱基准。"
+    },
+    "机械设备": {
+      "ts_code": "159886.SZ",
+      "proxy_quality": "direct",
+      "reason": "行业代理：覆盖细分机械设备产业，用作「机械设备」相对强弱基准。"
+    },
+    "煤炭": {
+      "ts_code": "515220.SH",
+      "proxy_quality": "direct",
+      "reason": "行业代理：覆盖煤炭产业，用作申万一级「煤炭」相对强弱基准。"
+    },
+    "石油石化": {
+      "ts_code": "561360.SH",
+      "proxy_quality": "partial",
+      "reason": "行业近似代理：油气产业覆盖石油石化主要链条，用作行业方向参考。"
+    },
+    "环保": {
+      "ts_code": "512580.SH",
+      "proxy_quality": "direct",
+      "reason": "行业代理：覆盖环保产业，用作申万一级「环保」相对强弱基准。"
+    }
+  },
+  "uncovered_industries": [
+    "商贸零售",
+    "纺织服饰",
+    "综合",
+    "美容护理",
+    "轻工制造"
+  ],
+  "fallback_policy": "没有可信行业ETF代理时不伪造映射；仅计算相对宽基强弱。"
+}

@@ -240,6 +240,56 @@ def build_text_card(message: str) -> dict[str, Any]:
     }
 
 
+def build_market_status_card(message: str, *, healthy: bool) -> dict[str, Any]:
+    """Build a mobile-friendly Card JSON 2.0 market collection status report."""
+    normalized = message.strip()
+    if not normalized:
+        raise ValueError("Feishu market status report cannot be empty")
+    if len(normalized) > 4_000:
+        raise ValueError("Feishu market status report cannot exceed 4000 characters")
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "title": {"tag": "plain_text", "content": "DawnWatcher 行情采集状态"},
+            "template": "green" if healthy else "orange",
+        },
+        "body": {"elements": [{"tag": "markdown", "content": normalized}]},
+    }
+
+
+def build_market_analysis_card(message: str, *, direction: str) -> dict[str, Any]:
+    """Build a Card JSON 2.0 market-temperature and sector-rotation report."""
+    normalized = message.strip()
+    if not normalized:
+        raise ValueError("Feishu market analysis report cannot be empty")
+    if len(normalized) > 4_000:
+        raise ValueError("Feishu market analysis report cannot exceed 4000 characters")
+    template = {
+        "过热": "orange",
+        "偏暖": "green",
+        "偏冷": "orange",
+        "风险收缩": "red",
+        "偏强": "green",
+        "偏弱": "red",
+        "震荡/分化": "blue",
+        "中性/分化": "blue",
+        "数据不足": "grey",
+    }.get(direction, "blue")
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "width_mode": "fill"},
+        "header": {
+            "title": {
+                "tag": "plain_text",
+                "content": "DawnWatcher 市场温度与15分钟概览",
+            },
+            "template": template,
+        },
+        "body": {"elements": [{"tag": "markdown", "content": normalized}]},
+    }
+
+
 def _format_operational_details(alert_key: str, details: dict[str, Any]) -> list[str]:
     if alert_key == "runtime.quote_watcher.heartbeat":
         return [

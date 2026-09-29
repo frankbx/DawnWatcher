@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from dawnwatcher import __version__
 from dawnwatcher.config import Settings
 from dawnwatcher.diagnostics.comparison import DiagnosticComparisonRunner
-from dawnwatcher.domain.quotes import MarketCollectionResult
+from dawnwatcher.domain.quotes import MarketCollectionResult, QuoteSymbol
 from dawnwatcher.logging import configure_logging
 from dawnwatcher.market import MarketPhase, MarketSessionStatus
 from dawnwatcher.market.gate import TushareTradingSessionGate
@@ -42,6 +42,13 @@ from dawnwatcher.storage.backup import online_backup
 from dawnwatcher.storage.database import create_database_engine, create_session_factory
 from dawnwatcher.storage.market_metrics import build_market_metrics_report
 from dawnwatcher.storage.market_quotes import persist_market_collection
+from dawnwatcher.storage.minute_features import build_minute_features, list_minute_features
+from dawnwatcher.storage.minute_parquet import (
+    MinuteTradingSession,
+    load_instrument_metadata,
+    merge_minute_day,
+    seal_minute_session,
+)
 from dawnwatcher.storage.schema import inspect_schema, upgrade_database
 from dawnwatcher.workflows.interval import FixedIntervalScheduler, IntervalScheduleResult
 
@@ -219,6 +226,98 @@ def build_parser() -> argparse.ArgumentParser:
         help="Local date in YYYY-MM-DD form; defaults to today.",
     )
 
+    feature_parser = subparsers.add_parser(
+        "features", help="Build and inspect auditable one-minute market features."
+    )
+    feature_commands = feature_parser.add_subparsers(dest="feature_command", required=True)
+    feature_build = feature_commands.add_parser(
+        "build", help="Build minute bars and features from persisted Tencent snapshots."
+    )
+    feature_build.add_argument(
+        "symbols",
+        nargs="*",
+        help="Optional Tushare ts_code values; omitted means all persisted symbols.",
+    )
+    feature_build.add_argument(
+        "--date",
+        type=date.fromisoformat,
+        help="Local trading date; defaults to today.",
+    )
+    feature_build.add_argument(
+        "--market-benchmark",
+        help="Tushare index or ETF code, for example 000001.SH or 510300.SH.",
+    )
+    feature_build.add_argument(
+        "--industry-map",
+        type=Path,
+        help="JSON object mapping each stock ts_code to an industry benchmark ts_code.",
+    )
+    feature_build.add_argument(
+        "--lookback-days",
+        type=_positive_integer,
+        default=20,
+        help="Maximum same-minute history used for relative volume (default: 20).",
+    )
+    feature_build.add_argument(
+        "--minimum-history-days",
+        type=_positive_integer,
+        default=5,
+        help="Minimum history required before relative volume is emitted (default: 5).",
+    )
+    feature_build.add_argument(
+        "--interval",
+        dest="interval_seconds",
+        type=_poll_interval_seconds,
+        help="Expected snapshot interval for coverage; defaults to configured value (15).",
+    )
+    feature_show = feature_commands.add_parser(
+        "show", help="Print persisted one-minute features as JSON."
+    )
+    feature_show.add_argument(
+        "--date",
+        type=date.fromisoformat,
+        help="Local trading date; defaults to today.",
+    )
+    feature_show.add_argument("--symbol", help="Optional Tushare ts_code filter.")
+    feature_seal = feature_commands.add_parser(
+        "seal", help="Seal one completed morning or afternoon minute partition to Parquet."
+    )
+    feature_seal.add_argument(
+        "--date",
+        type=date.fromisoformat,
+        help="Local trading date; defaults to today.",
+    )
+    feature_seal.add_argument(
+        "--session",
+        dest="trading_session",
+        required=True,
+        choices=[item.value for item in MinuteTradingSession],
+    )
+    feature_seal.add_argument(
+        "--pool-file",
+        type=Path,
+        default=Path("config/stock_pools/initial-v1/pool.json"),
+        help="Pool JSON supplying expected symbols and analytical labels.",
+    )
+    feature_seal.add_argument(
+        "--output-root",
+        type=Path,
+        help="Dataset root; defaults to data/lake/minute_market.",
+    )
+    feature_merge_day = feature_commands.add_parser(
+        "merge-day", help="Merge sealed morning and afternoon partitions into one daily file."
+    )
+    feature_merge_day.add_argument(
+        "--date",
+        type=date.fromisoformat,
+        help="Local trading date; defaults to today.",
+    )
+    feature_merge_day.add_argument(
+        "--output-root",
+        type=Path,
+        help="Dataset root; defaults to data/lake/minute_market.",
+    )
+
     monitor_parser = subparsers.add_parser(
         "monitor", help="Check or continuously monitor runtime operational health."
     )
@@ -315,6 +414,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "quotes":
         return _run_quote_command(settings, args)
+
+    if args.command == "features":
+        return _run_feature_command(settings, args)
 
     if args.command == "monitor":
         return _run_monitor_command(settings, args)
@@ -522,6 +624,107 @@ def _run_quote_command(settings: Settings, args: argparse.Namespace) -> int:
         return 0 if schedule.failed_runs == 0 else 1
 
     raise ValueError(f"unsupported quote command: {args.quote_command}")
+
+
+def _run_feature_command(settings: Settings, args: argparse.Namespace) -> int:
+    """Build or inspect persisted minute-level features."""
+    local_today = datetime.now(ZoneInfo(settings.timezone)).date()
+    trade_date = args.date or local_today
+    engine = create_database_engine(settings)
+    try:
+        if args.feature_command == "build":
+            selected_symbols = {symbol.ts_code for symbol in parse_symbols(args.symbols)} or None
+            market_benchmark = (
+                QuoteSymbol.parse(args.market_benchmark).ts_code if args.market_benchmark else None
+            )
+            industry_benchmarks = _load_industry_benchmarks(args.industry_map)
+            with create_session_factory(engine).begin() as session:
+                report = build_minute_features(
+                    session,
+                    trade_date=trade_date,
+                    timezone=settings.timezone,
+                    expected_interval_seconds=(
+                        args.interval_seconds or settings.market_poll_interval_seconds
+                    ),
+                    market_benchmark_symbol=market_benchmark,
+                    industry_benchmarks=industry_benchmarks,
+                    relative_volume_lookback_days=args.lookback_days,
+                    relative_volume_minimum_history_days=args.minimum_history_days,
+                    symbols=selected_symbols,
+                )
+            print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
+            return 0
+
+        if args.feature_command == "show":
+            symbol = QuoteSymbol.parse(args.symbol).ts_code if args.symbol else None
+            with create_session_factory(engine)() as session:
+                rows = list_minute_features(
+                    session,
+                    trade_date=trade_date,
+                    timezone=settings.timezone,
+                    symbol=symbol,
+                )
+            print(
+                json.dumps(
+                    {
+                        "trade_date": trade_date.isoformat(),
+                        "symbol": symbol,
+                        "count": len(rows),
+                        "features": rows,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 0
+
+        if args.feature_command == "seal":
+            metadata = load_instrument_metadata(args.pool_file)
+            output_root = args.output_root or settings.data_dir / "lake" / "minute_market"
+            with create_session_factory(engine)() as session:
+                seal_report = seal_minute_session(
+                    session,
+                    trade_date=trade_date,
+                    trading_session=MinuteTradingSession(args.trading_session),
+                    timezone=settings.timezone,
+                    output_root=output_root,
+                    instrument_metadata=metadata,
+                    observed_at=datetime.now(UTC),
+                )
+            print(json.dumps(seal_report.to_dict(), ensure_ascii=False, indent=2))
+            return 0 if seal_report.complete else 3
+
+        if args.feature_command == "merge-day":
+            output_root = args.output_root or settings.data_dir / "lake" / "minute_market"
+            day_report = merge_minute_day(
+                trade_date=trade_date,
+                timezone=settings.timezone,
+                output_root=output_root,
+                observed_at=datetime.now(UTC),
+            )
+            print(json.dumps(day_report.to_dict(), ensure_ascii=False, indent=2))
+            return 0 if day_report.complete else 3
+    finally:
+        engine.dispose()
+
+    raise ValueError(f"unsupported feature command: {args.feature_command}")
+
+
+def _load_industry_benchmarks(path: Path | None) -> dict[str, str]:
+    """Load and canonicalize a stock-to-industry-benchmark JSON mapping."""
+    if path is None:
+        return {}
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("industry map must be a JSON object")
+    result: dict[str, str] = {}
+    for raw_symbol, raw_benchmark in payload.items():
+        if not isinstance(raw_symbol, str) or not isinstance(raw_benchmark, str):
+            raise ValueError("industry map keys and values must be strings")
+        symbol = QuoteSymbol.parse(raw_symbol).ts_code
+        benchmark = QuoteSymbol.parse(raw_benchmark).ts_code
+        result[symbol] = benchmark
+    return result
 
 
 def _run_monitor_command(settings: Settings, args: argparse.Namespace) -> int:

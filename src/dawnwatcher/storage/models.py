@@ -416,3 +416,89 @@ class ReconciledQuoteSnapshot(Base):
     comparisons: Mapped[list[dict[str, Any]]] = mapped_column(JSON(), nullable=False)
     reasons: Mapped[list[str]] = mapped_column(JSON(), nullable=False)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)
+
+
+class MinuteBar(TimestampMixin, Base):
+    """One auditable minute bar derived from validated quote snapshots."""
+
+    __tablename__ = "minute_bar"
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "symbol",
+            "minute_start",
+            name="uq_minute_bar_provider_symbol_start",
+        ),
+        Index("ix_minute_bar_symbol_trade_time", "symbol", "trade_date", "minute_start"),
+        Index("ix_minute_bar_trade_time", "trade_date", "minute_start"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    provider: Mapped[QuoteProvider] = mapped_column(
+        SAEnum(
+            QuoteProvider,
+            native_enum=False,
+            values_callable=lambda enum_type: [member.value for member in enum_type],
+            length=20,
+        ),
+        nullable=False,
+    )
+    symbol: Mapped[str] = mapped_column(String(9), nullable=False)
+    exchange: Mapped[Exchange] = mapped_column(
+        SAEnum(
+            Exchange,
+            native_enum=False,
+            values_callable=lambda enum_type: [member.value for member in enum_type],
+            length=10,
+        ),
+        nullable=False,
+    )
+    trade_date: Mapped[date] = mapped_column(Date(), nullable=False)
+    minute_start: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    minute_end: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    open: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    high: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    low: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    close: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    cumulative_volume_start: Mapped[int | None] = mapped_column(BigInteger(), nullable=True)
+    cumulative_volume_end: Mapped[int] = mapped_column(BigInteger(), nullable=False)
+    volume_shares: Mapped[int | None] = mapped_column(BigInteger(), nullable=True)
+    cumulative_amount_start: Mapped[Decimal | None] = mapped_column(Numeric(24, 4), nullable=True)
+    cumulative_amount_end: Mapped[Decimal] = mapped_column(Numeric(24, 4), nullable=False)
+    amount_cny: Mapped[Decimal | None] = mapped_column(Numeric(24, 4), nullable=True)
+    vwap: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    sample_count: Mapped[int] = mapped_column(Integer(), nullable=False)
+    expected_sample_count: Mapped[int] = mapped_column(Integer(), nullable=False)
+    coverage_ratio: Mapped[Decimal] = mapped_column(Numeric(10, 6), nullable=False)
+    first_quote_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    last_quote_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    quality_flags: Mapped[list[str]] = mapped_column(JSON(), default=list, nullable=False)
+
+
+class MinuteFeature(TimestampMixin, Base):
+    """Decision-facing features calculated from one persisted minute bar."""
+
+    __tablename__ = "minute_feature"
+    __table_args__ = (
+        UniqueConstraint("minute_bar_id", name="uq_minute_feature_minute_bar_id"),
+        Index("ix_minute_feature_market_benchmark", "market_benchmark_symbol"),
+        Index("ix_minute_feature_industry_benchmark", "industry_benchmark_symbol"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    minute_bar_id: Mapped[str] = mapped_column(
+        ForeignKey("minute_bar.id", ondelete="CASCADE"), nullable=False
+    )
+    price_trend_bps: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    vwap_deviation_bps: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    relative_volume_ratio: Mapped[Decimal | None] = mapped_column(Numeric(20, 8), nullable=True)
+    relative_volume_history_days: Mapped[int] = mapped_column(Integer(), nullable=False)
+    market_benchmark_symbol: Mapped[str | None] = mapped_column(String(9), nullable=True)
+    market_relative_strength_bps: Mapped[Decimal | None] = mapped_column(
+        Numeric(20, 6), nullable=True
+    )
+    industry_benchmark_symbol: Mapped[str | None] = mapped_column(String(9), nullable=True)
+    industry_relative_strength_bps: Mapped[Decimal | None] = mapped_column(
+        Numeric(20, 6), nullable=True
+    )
+    quality_flags: Mapped[list[str]] = mapped_column(JSON(), default=list, nullable=False)

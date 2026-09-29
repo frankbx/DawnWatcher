@@ -44,5 +44,5 @@ def test_runtime_directories_are_scoped_to_data_dir(tmp_path: Path) -> None:
     settings = Settings(data_dir=tmp_path, _env_file=None)
 
     assert settings.runtime_directories == tuple(
-        tmp_path / name for name in ("db", "raw", "reports", "backups")
+        tmp_path / name for name in ("db", "raw", "reports", "backups", "lake")
     )

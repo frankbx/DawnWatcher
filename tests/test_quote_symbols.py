@@ -16,6 +16,10 @@ from dawnwatcher.providers.collector import parse_symbols
         ("920001.BJ", "920001.BJ", Exchange.BSE, "bj920001"),
         ("sh600000", "600000.SH", Exchange.SSE, "sh600000"),
         ("000001", "000001.SZ", Exchange.SZSE, "sz000001"),
+        ("000001.SH", "000001.SH", Exchange.SSE, "sh000001"),
+        ("510300.SH", "510300.SH", Exchange.SSE, "sh510300"),
+        ("399001.SZ", "399001.SZ", Exchange.SZSE, "sz399001"),
+        ("159915.SZ", "159915.SZ", Exchange.SZSE, "sz159915"),
     ],
 )
 def test_symbol_inputs_normalize_to_tushare_format(

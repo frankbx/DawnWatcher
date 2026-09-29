@@ -82,10 +82,11 @@ class QuoteSymbol:
         if len(normalized) != 6 or not normalized.isdigit():
             raise ValueError(f"invalid mainland security code: {value}")
 
-        inferred = _infer_exchange(normalized)
-        if explicit_exchange is not None and explicit_exchange is not inferred:
-            raise ValueError(f"symbol prefix and exchange disagree: {value}")
-        return cls(code=normalized, exchange=inferred)
+        if explicit_exchange is not None:
+            if not _supports_explicit_exchange(normalized, explicit_exchange):
+                raise ValueError(f"symbol prefix and exchange disagree: {value}")
+            return cls(code=normalized, exchange=explicit_exchange)
+        return cls(code=normalized, exchange=_infer_exchange(normalized))
 
     @property
     def ts_code(self) -> str:
@@ -116,6 +117,15 @@ def _infer_exchange(code: str) -> Exchange:
     if code.startswith(("4", "8", "920")):
         return Exchange.BSE
     raise ValueError(f"unsupported A-share code prefix: {code}")
+
+
+def _supports_explicit_exchange(code: str, exchange: Exchange) -> bool:
+    """Validate explicitly suffixed stocks, indices, and exchange-traded funds."""
+    if exchange is Exchange.SSE:
+        return code.startswith(("000", "5", "600", "601", "603", "605", "688", "689"))
+    if exchange is Exchange.SZSE:
+        return code.startswith(("000", "001", "002", "003", "15", "16", "300", "301", "399"))
+    return code.startswith(("4", "8", "920"))
 
 
 @dataclass(frozen=True, slots=True)

@@ -105,7 +105,7 @@ class Settings(BaseSettings):
     @property
     def runtime_directories(self) -> tuple[Path, ...]:
         """Return all directories the application expects to write to."""
-        return tuple(self.data_dir / name for name in ("db", "raw", "reports", "backups"))
+        return tuple(self.data_dir / name for name in ("db", "raw", "reports", "backups", "lake"))
 
     @property
     def database_path(self) -> Path:
