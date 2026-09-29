@@ -18,6 +18,8 @@ def test_default_settings() -> None:
     assert settings.data_dir == Path("data")
     assert settings.market_poll_interval_seconds == 15.0
     assert settings.tushare_token_file == Path("token")
+    assert settings.feishu_webhook_file == Path("feishu_webhook")
+    assert settings.notification_poll_interval_seconds == 5.0
 
 
 def test_invalid_timezone_is_rejected() -> None:

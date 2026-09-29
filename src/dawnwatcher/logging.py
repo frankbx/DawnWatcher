@@ -77,3 +77,7 @@ def configure_logging(level: LogLevel = "INFO") -> None:
     root.handlers.clear()
     root.addHandler(handler)
     root.setLevel(level)
+    # httpx emits request URLs at INFO; those URLs may contain Feishu webhook secrets.
+    # Keep provider request details available at DEBUG without leaking credentials by default.
+    for client_logger in ("httpx", "httpcore"):
+        logging.getLogger(client_logger).setLevel(logging.WARNING)

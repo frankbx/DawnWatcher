@@ -78,18 +78,22 @@ def claim_next_notification(
     *,
     now: datetime | None = None,
     lease_seconds: int = 30,
+    channel: str | None = None,
 ) -> NotificationClaim | None:
     """Atomically lease the oldest deliverable notification."""
     if lease_seconds < 1:
         raise ValueError("lease_seconds must be positive")
     timestamp = now or utc_now()
 
+    predicates = [
+        NotificationOutbox.status.in_(DELIVERABLE_NOTIFICATION_STATUSES),
+        NotificationOutbox.next_attempt_at <= timestamp,
+    ]
+    if channel is not None:
+        predicates.append(NotificationOutbox.channel == channel)
     candidate = session.scalar(
         select(NotificationOutbox)
-        .where(
-            NotificationOutbox.status.in_(DELIVERABLE_NOTIFICATION_STATUSES),
-            NotificationOutbox.next_attempt_at <= timestamp,
-        )
+        .where(*predicates)
         .order_by(NotificationOutbox.next_attempt_at, NotificationOutbox.created_at)
         .limit(1)
     )

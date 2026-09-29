@@ -55,6 +55,14 @@ class Settings(BaseSettings):
     disk_warning_free_bytes: int = Field(default=5 * 1024**3, ge=1)
     alert_channel: str = "feishu"
     alert_recipient: str = "operators"
+    feishu_webhook_file: Path = Path("feishu_webhook")
+    feishu_signing_secret_file: Path = Path("feishu_secret")
+    feishu_request_timeout_seconds: float = Field(default=8.0, ge=1.0, le=30.0)
+    notification_poll_interval_seconds: float = Field(default=5.0, ge=1.0, le=3_600.0)
+    notification_batch_size: int = Field(default=20, ge=1, le=100)
+    notification_lease_seconds: int = Field(default=30, ge=5, le=300)
+    notification_retry_base_seconds: int = Field(default=30, ge=1, le=3_600)
+    notification_retry_max_seconds: int = Field(default=1_800, ge=1, le=86_400)
 
     @field_validator("timezone")
     @classmethod
@@ -82,6 +90,16 @@ class Settings(BaseSettings):
         critical = data.get("disk_critical_free_bytes")
         if critical is not None and value <= critical:
             raise ValueError("disk_warning_free_bytes must exceed disk_critical_free_bytes")
+        return value
+
+    @field_validator("notification_retry_max_seconds")
+    @classmethod
+    def validate_notification_retry_thresholds(cls, value: int, info: object) -> int:
+        """Keep the retry cap at or above the first retry delay."""
+        data = getattr(info, "data", {})
+        base = data.get("notification_retry_base_seconds")
+        if base is not None and value < base:
+            raise ValueError("notification_retry_max_seconds cannot be less than the retry base")
         return value
 
     @property
@@ -131,4 +149,12 @@ class Settings(BaseSettings):
             "disk_critical_free_bytes": str(self.disk_critical_free_bytes),
             "alert_channel": self.alert_channel,
             "alert_recipient": self.alert_recipient,
+            "feishu_webhook_file": str(self.feishu_webhook_file),
+            "feishu_signing_secret_file": str(self.feishu_signing_secret_file),
+            "feishu_request_timeout_seconds": str(self.feishu_request_timeout_seconds),
+            "notification_poll_interval_seconds": str(self.notification_poll_interval_seconds),
+            "notification_batch_size": str(self.notification_batch_size),
+            "notification_lease_seconds": str(self.notification_lease_seconds),
+            "notification_retry_base_seconds": str(self.notification_retry_base_seconds),
+            "notification_retry_max_seconds": str(self.notification_retry_max_seconds),
         }

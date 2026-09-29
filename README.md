@@ -1,7 +1,7 @@
 # DawnWatcher
 
-DawnWatcher is a deterministic, auditable trading-assistance platform. It will combine
-Tencent intraday market monitoring, post-close data workflows, Feishu notifications, and
+DawnWatcher is a deterministic, auditable trading-assistance platform. It combines
+Tencent intraday market monitoring and Feishu operational alerts, and will add post-close workflows and
 narrowly scoped language-model agents.
 
 The project is currently at **Phase 2: single-source market data foundation**. In addition to
@@ -9,8 +9,8 @@ the durable Phase 1 foundation, it collects A-share snapshots from Tencent, vali
 archives the exact raw responses, replays archives offline, and persists auditable snapshots
 in SQLite. It also provides non-overlapping fixed-interval collection for unattended
 operation. Tushare `trade_cal` is cached in SQLite and gates all live collection by trading
-day and auction phase. Strategies, external notification delivery, and agents will be
-implemented in later phases.
+day and auction phase. Operational alerts can be delivered through a durable Feishu custom-bot
+worker. Strategies, decision notifications, and agents will be implemented in later phases.
 
 The active collector intentionally uses Tencent only. Historical Sina/Tencent rows remain
 readable in SQLite for audit purposes, but new collections do not request Sina, perform
@@ -61,6 +61,8 @@ dawnwatcher quotes replay data/raw/quotes/YYYY-MM-DD/tencent/example.json.gz \
   --expected-date 2026-09-24
 dawnwatcher monitor check
 dawnwatcher monitor watch
+dawnwatcher notifications deliver --max-items 20
+dawnwatcher notifications watch
 ```
 
 `calendar sync` downloads the current calendar year from Tushare by default and atomically
@@ -126,8 +128,19 @@ Run `monitor watch` as a separate supervised process so a dead or stalled quote 
 detected. The monitor checks quote-watcher heartbeat freshness, usable-collection freshness
 during active auction phases, and free space on the runtime data filesystem. Alerts are
 stateful: the first observation, severity escalation, and recovery are each enqueued once in
-the transactional notification outbox. External Feishu delivery is not implemented yet, so
-these alerts remain safely queued until a notification worker is added.
+the transactional notification outbox.
+
+To deliver those records to a phone, add a custom bot to the target Feishu group and put its
+complete V2 webhook URL alone in the project-root `feishu_webhook` file. If the bot enables
+signature verification, put the signing secret alone in `feishu_secret`; otherwise leave that
+file absent. Both files are excluded from version control and should have mode `0600`. Run
+`notifications watch` as a third supervised process. It polls every 5 seconds by default,
+leases at most 20 messages at a time, records every delivery attempt, retries with capped
+exponential backoff, and dead-letters a notification after its configured maximum attempts.
+Outbox alerts and `notifications test` messages are sent as Feishu interactive cards using
+Card JSON schema 2.0 (`msg_type: interactive`, with content under `card.body.elements`).
+The webhook URL is restricted to approved Feishu/Lark custom-bot HTTPS endpoints and is never
+included in logs, public configuration, or database error messages.
 
 Defaults are a 30-second monitor cadence, a 60-second stale-heartbeat threshold, a 60-second
 collection-gap threshold, a 5 GiB disk warning, and a 1 GiB disk critical alert. They can be

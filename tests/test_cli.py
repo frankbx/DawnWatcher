@@ -87,3 +87,16 @@ def test_stats_and_monitor_commands_parse() -> None:
 
     assert stats.date.isoformat() == "2026-09-28"
     assert monitor.interval_seconds == 30.0
+
+
+def test_notification_worker_commands_parse() -> None:
+    test = build_parser().parse_args(["notifications", "test", "旺财旺财"])
+    deliver = build_parser().parse_args(["notifications", "deliver", "--max-items", "5"])
+    watch = build_parser().parse_args(
+        ["notifications", "watch", "--interval", "10", "--max-runs", "2"]
+    )
+
+    assert test.text == "旺财旺财"
+    assert deliver.max_items == 5
+    assert watch.interval_seconds == 10.0
+    assert watch.max_runs == 2

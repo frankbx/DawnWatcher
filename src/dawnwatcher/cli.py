@@ -22,6 +22,12 @@ from dawnwatcher.domain.quotes import MarketCollectionResult
 from dawnwatcher.logging import configure_logging
 from dawnwatcher.market import MarketPhase, MarketSessionStatus
 from dawnwatcher.market.gate import TushareTradingSessionGate
+from dawnwatcher.notifications.feishu import (
+    FeishuConfigurationError,
+    FeishuCredentials,
+    FeishuWebhookClient,
+)
+from dawnwatcher.notifications.worker import NotificationDeliveryWorker
 from dawnwatcher.ops.health import run_startup_checks
 from dawnwatcher.ops.monitoring import (
     QUOTE_WATCHER_SERVICE,
@@ -239,6 +245,44 @@ def build_parser() -> argparse.ArgumentParser:
         type=_positive_integer,
         help="Stop after this many checks; omitted means run until stopped.",
     )
+
+    notification_parser = subparsers.add_parser(
+        "notifications", help="Deliver durable notification outbox messages."
+    )
+    notification_commands = notification_parser.add_subparsers(
+        dest="notification_command", required=True
+    )
+    test_parser = notification_commands.add_parser(
+        "test", help="Send one direct Card JSON 2.0 message without writing to the outbox."
+    )
+    test_parser.add_argument("text", help="Message text to place in the Feishu card.")
+    deliver_parser = notification_commands.add_parser(
+        "deliver", help="Deliver one bounded batch of pending Feishu messages."
+    )
+    deliver_parser.add_argument(
+        "--max-items",
+        type=_positive_integer,
+        help="Maximum messages; defaults to the configured batch size (20).",
+    )
+    notification_watch = notification_commands.add_parser(
+        "watch", help="Continuously deliver pending Feishu messages."
+    )
+    notification_watch.add_argument(
+        "--interval",
+        dest="interval_seconds",
+        type=_poll_interval_seconds,
+        help="Seconds between outbox polls; defaults to configured value (5).",
+    )
+    notification_watch.add_argument(
+        "--max-items",
+        type=_positive_integer,
+        help="Maximum messages per poll; defaults to the configured batch size (20).",
+    )
+    notification_watch.add_argument(
+        "--max-runs",
+        type=_positive_integer,
+        help="Stop after this many polls; omitted means run until stopped.",
+    )
     return parser
 
 
@@ -274,6 +318,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "monitor":
         return _run_monitor_command(settings, args)
+
+    if args.command == "notifications":
+        return _run_notification_command(settings, args)
 
     parser.error(f"unknown command: {args.command}")
 
@@ -510,6 +557,107 @@ def _run_monitor_command(settings: Settings, args: argparse.Namespace) -> int:
         return 0 if result.failed_runs == 0 else 1
 
     raise ValueError(f"unsupported monitor command: {args.monitor_command}")
+
+
+def _run_notification_command(settings: Settings, args: argparse.Namespace) -> int:
+    """Deliver outbox records through the configured Feishu custom bot."""
+    max_items = getattr(args, "max_items", None) or settings.notification_batch_size
+    try:
+        credentials = FeishuCredentials.from_files(
+            settings.feishu_webhook_file,
+            settings.feishu_signing_secret_file,
+        )
+    except FeishuConfigurationError as exc:
+        print(
+            json.dumps(
+                {"event": "notification.configuration.error", "error": str(exc)},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            flush=True,
+        )
+        return 2
+
+    if args.notification_command == "test":
+        test_result = asyncio.run(
+            _send_notification_test(
+                settings,
+                credentials=credentials,
+                text=args.text,
+            )
+        )
+        print(
+            json.dumps(
+                {"event": "notification.test.completed", **test_result},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            flush=True,
+        )
+        return 0
+
+    if args.notification_command == "deliver":
+        delivery_result = asyncio.run(
+            _deliver_notifications_once(
+                settings,
+                credentials=credentials,
+                max_items=max_items,
+            )
+        )
+        print(
+            json.dumps(
+                {"event": "notification.delivery.completed", **delivery_result},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            flush=True,
+        )
+        return 0 if delivery_result["failed"] == 0 else 1
+
+    if args.notification_command == "watch":
+        interval_seconds = args.interval_seconds or settings.notification_poll_interval_seconds
+        try:
+            schedule, totals = asyncio.run(
+                _watch_notifications(
+                    settings,
+                    credentials=credentials,
+                    interval_seconds=interval_seconds,
+                    max_runs=args.max_runs,
+                    max_items=max_items,
+                )
+            )
+        except KeyboardInterrupt:
+            return 130
+        print(
+            json.dumps(
+                {
+                    "event": "notification.schedule.stopped",
+                    **schedule.to_dict(),
+                    "delivery_totals": totals,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            flush=True,
+        )
+        return 0 if schedule.failed_runs == 0 else 1
+
+    raise ValueError(f"unsupported notification command: {args.notification_command}")
+
+
+async def _send_notification_test(
+    settings: Settings,
+    *,
+    credentials: FeishuCredentials,
+    text: str,
+) -> dict[str, str | None]:
+    """Send a direct Feishu test message without touching durable alert state."""
+    async with FeishuWebhookClient(
+        credentials,
+        timeout_seconds=settings.feishu_request_timeout_seconds,
+    ) as client:
+        receipt = await client.send_text(text)
+    return {"provider_message_id": receipt.provider_message_id}
 
 
 async def _collect_quotes(
@@ -908,6 +1056,111 @@ async def _watch_monitor(
             stop_event=stop_event,
             max_runs=max_runs,
         )
+    finally:
+        engine.dispose()
+        for registered_signal in registered_signals:
+            loop.remove_signal_handler(registered_signal)
+
+
+async def _deliver_notifications_once(
+    settings: Settings,
+    *,
+    credentials: FeishuCredentials,
+    max_items: int,
+) -> dict[str, int]:
+    """Drain one bounded Feishu outbox batch."""
+    engine = create_database_engine(settings)
+    try:
+        async with FeishuWebhookClient(
+            credentials,
+            timeout_seconds=settings.feishu_request_timeout_seconds,
+        ) as client:
+            worker = NotificationDeliveryWorker(
+                create_session_factory(engine),
+                client,
+                lease_seconds=settings.notification_lease_seconds,
+                retry_base_seconds=settings.notification_retry_base_seconds,
+                retry_max_seconds=settings.notification_retry_max_seconds,
+            )
+            return (await worker.deliver_batch(max_items=max_items)).to_dict()
+    finally:
+        engine.dispose()
+
+
+async def _watch_notifications(
+    settings: Settings,
+    *,
+    credentials: FeishuCredentials,
+    interval_seconds: float,
+    max_runs: int | None,
+    max_items: int,
+) -> tuple[IntervalScheduleResult, dict[str, int]]:
+    """Continuously drain Feishu outbox records with clean signal handling."""
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    registered_signals: list[signal.Signals] = []
+    for watched_signal in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(watched_signal, stop_event.set)
+        except (NotImplementedError, RuntimeError):
+            continue
+        registered_signals.append(watched_signal)
+
+    totals = {"claimed": 0, "sent": 0, "failed": 0, "dead": 0, "recovered": 0}
+    print(
+        json.dumps(
+            {
+                "event": "notification.schedule.started",
+                "channel": "feishu",
+                "interval_seconds": interval_seconds,
+                "max_items_per_poll": max_items,
+                "max_runs": max_runs,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+        flush=True,
+    )
+
+    engine = create_database_engine(settings)
+    try:
+        async with FeishuWebhookClient(
+            credentials,
+            timeout_seconds=settings.feishu_request_timeout_seconds,
+        ) as client:
+            worker = NotificationDeliveryWorker(
+                create_session_factory(engine),
+                client,
+                lease_seconds=settings.notification_lease_seconds,
+                retry_base_seconds=settings.notification_retry_base_seconds,
+                retry_max_seconds=settings.notification_retry_max_seconds,
+            )
+
+            async def deliver_once(run_number: int) -> bool:
+                result = await worker.deliver_batch(max_items=max_items)
+                payload = result.to_dict()
+                for key, value in payload.items():
+                    totals[key] += value
+                print(
+                    json.dumps(
+                        {
+                            "event": "notification.delivery.completed",
+                            "run_number": run_number,
+                            **payload,
+                        },
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                    flush=True,
+                )
+                return result.claimed > 0
+
+            schedule = await FixedIntervalScheduler(interval_seconds).run(
+                deliver_once,
+                stop_event=stop_event,
+                max_runs=max_runs,
+            )
+            return schedule, totals
     finally:
         engine.dispose()
         for registered_signal in registered_signals:
