@@ -316,8 +316,8 @@ def _holdings_table_elements(
                 "name": name,
                 "price": price,
                 "daily": _card_colored_pct(item.get("day_pct")),
-                "pnl": _card_colored_pct(item.get("pnl_pct")),
                 "window": _card_colored_pct(item.get("window_pct")),
+                "pnl": _card_colored_pct(item.get("pnl_pct")),
             }
         )
         comparison_rows.append(
@@ -358,8 +358,8 @@ def _holdings_table_elements(
                 ("name", "标的", "text"),
                 ("price", "现价", "markdown"),
                 ("daily", "当日", "markdown"),
-                ("pnl", "较成本", "markdown"),
                 ("window", window_label, "markdown"),
+                ("pnl", "较成本", "markdown"),
             ],
             snapshot_rows,
         ),

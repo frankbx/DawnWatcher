@@ -192,8 +192,8 @@ def test_holdings_card_highlights_price_relative_to_cost(
         "标的",
         "现价",
         "当日",
-        "较成本",
         "近5分",
+        "较成本",
     ]
     rows = snapshot["rows"]
     assert rows[0]["daily"] == "**<font color='green'>-1.00%</font>**"
