@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import signal
 from collections.abc import Sequence
 from dataclasses import asdict
@@ -13,6 +14,7 @@ from pathlib import Path
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from regimebeacon import __version__
@@ -53,6 +55,8 @@ from regimebeacon.storage.minute_parquet import (
 )
 from regimebeacon.storage.schema import inspect_schema, upgrade_database
 from regimebeacon.workflows.interval import FixedIntervalScheduler, IntervalScheduleResult
+
+logger = logging.getLogger(__name__)
 
 
 def _poll_interval_seconds(value: str) -> float:
@@ -143,6 +147,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--ignore-market-gate",
         action="store_true",
         help="Diagnostic override: request quotes outside an active auction phase.",
+    )
+    probe_parser = quote_commands.add_parser(
+        "probe-opening",
+        help="Fetch an opening-auction Tencent sample without archiving or persisting it.",
+    )
+    probe_parser.add_argument(
+        "symbols", nargs="+", help="Small Tushare-format verification sample."
     )
     watch_parser = quote_commands.add_parser(
         "watch", help="Continuously collect non-overlapping Tencent snapshots."
@@ -423,6 +434,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("config/stock_pools/initial-v1/all_symbols.txt"),
     )
     runtime_run.add_argument(
+        "--holdings-file",
+        type=Path,
+        default=Path("data/private/holdings.json"),
+        help="Optional private holdings file; when present, adds held symbols and a separate card.",
+    )
+    runtime_run.add_argument(
         "--industry-map",
         type=Path,
         default=Path("config/stock_pools/initial-v1/industry_benchmarks.json"),
@@ -564,11 +581,13 @@ def _run_quote_command(settings: Settings, args: argparse.Namespace) -> int:
     if args.quote_command == "collect":
         market_phase: MarketPhase | None = None
         expected_trade_date = args.expected_date
+        local_clock = datetime.now(ZoneInfo(settings.timezone)).time()
+        opening_probe = time(9, 15) <= local_clock <= time(9, 25)
         if not args.ignore_market_gate:
             session_status, coverage = asyncio.run(
                 _load_market_session_status(settings, datetime.now(UTC))
             )
-            if not session_status.collect_quotes:
+            if not session_status.collect_production_quotes:
                 print(
                     json.dumps(
                         {
@@ -589,18 +608,73 @@ def _run_quote_command(settings: Settings, args: argparse.Namespace) -> int:
                 args.symbols,
                 expected_trade_date=expected_trade_date,
                 idempotency_key=args.idempotency_key,
-                archive_raw=not args.no_archive,
+                archive_raw=not args.no_archive and not opening_probe,
                 market_phase=market_phase,
             )
         )
-        if not args.no_persist:
+        if not args.no_persist and not opening_probe:
             engine = create_database_engine(settings)
             try:
                 with create_session_factory(engine).begin() as session:
                     persist_market_collection(session, result)
             finally:
                 engine.dispose()
-        print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+        print(
+            json.dumps(
+                {
+                    **result.to_dict(),
+                    "opening_probe_mode": opening_probe,
+                    "persisted": not args.no_persist and not opening_probe,
+                    "archived": not args.no_archive and not opening_probe,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 0
+
+    if args.quote_command == "probe-opening":
+        session_status, coverage = asyncio.run(
+            _load_market_session_status(settings, datetime.now(UTC))
+        )
+        if (
+            session_status.phase is not MarketPhase.OPENING_CALL_AUCTION
+            or not session_status.collect_quotes
+        ):
+            print(
+                json.dumps(
+                    {
+                        "event": "market.opening_probe.skipped",
+                        **session_status.to_dict(),
+                        "calendar_coverage": coverage,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 0
+        result = asyncio.run(
+            _collect_quotes(
+                settings,
+                args.symbols,
+                expected_trade_date=session_status.trade_date,
+                idempotency_key=None,
+                archive_raw=False,
+                market_phase=session_status.phase,
+            )
+        )
+        print(
+            json.dumps(
+                {
+                    "event": "market.opening_probe.completed",
+                    "persisted": False,
+                    "archived": False,
+                    **result.to_dict(include_quotes=False),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
         return 0
 
     if args.quote_command == "replay":
@@ -953,6 +1027,7 @@ def _run_runtime_command(settings: Settings, args: argparse.Namespace) -> int:
             pool_file=args.pool_file,
             industry_map_file=args.industry_map,
             symbols_file=args.symbols_file,
+            holdings_file=args.holdings_file,
             market_benchmark=args.market_benchmark,
             analysis_window_minutes=args.analysis_window_minutes,
             status_interval_minutes=args.status_interval_minutes,
@@ -1063,22 +1138,19 @@ async def _watch_quotes(
     gate = _build_trading_session_gate(settings, session_factory)
     heartbeat_instance = str(uuid4())
     heartbeat_details: dict[str, object] = {
-        "symbols": [symbol.ts_code for symbol in symbols],
+        "symbol_count": len(symbols),
         "archive_raw": archive_raw,
         "persist_quotes": persist,
         "attempted_runs": 0,
         "last_collection_at": None,
         "last_usable_collection_at": None,
     }
-    with session_factory.begin() as session:
-        start_runtime_heartbeat(
-            session,
-            service_name=QUOTE_WATCHER_SERVICE,
-            instance_id=heartbeat_instance,
-            interval_seconds=interval_seconds,
-            now=datetime.now(UTC),
-            details=dict(heartbeat_details),
-        )
+    _touch_quote_watcher_heartbeat(
+        session_factory,
+        instance_id=heartbeat_instance,
+        interval_seconds=interval_seconds,
+        details=heartbeat_details,
+    )
     initial_status = await gate.status_at(datetime.now(UTC))
     print(
         json.dumps(
@@ -1113,13 +1185,6 @@ async def _watch_quotes(
                         "market_phase": session_status.phase.value,
                     }
                 )
-                with session_factory.begin() as session:
-                    touch_runtime_heartbeat(
-                        session,
-                        instance_id=heartbeat_instance,
-                        now=datetime.now(UTC),
-                        details=dict(heartbeat_details),
-                    )
                 session_key = (session_status.trade_date, session_status.phase.value)
                 if session_key != last_session:
                     print(
@@ -1131,7 +1196,13 @@ async def _watch_quotes(
                         flush=True,
                     )
                     last_session = session_key
-                if not session_status.collect_quotes:
+                if not session_status.collect_production_quotes:
+                    _touch_quote_watcher_heartbeat(
+                        session_factory,
+                        instance_id=heartbeat_instance,
+                        interval_seconds=interval_seconds,
+                        details=heartbeat_details,
+                    )
                     return False
                 result = await collector.collect(
                     symbols,
@@ -1145,13 +1216,12 @@ async def _watch_quotes(
                 heartbeat_details["last_collection_at"] = result.finished_at.isoformat()
                 if any(item.selected_quote is not None for item in result.reconciled.values()):
                     heartbeat_details["last_usable_collection_at"] = result.finished_at.isoformat()
-                with session_factory.begin() as session:
-                    touch_runtime_heartbeat(
-                        session,
-                        instance_id=heartbeat_instance,
-                        now=datetime.now(UTC),
-                        details=dict(heartbeat_details),
-                    )
+                _touch_quote_watcher_heartbeat(
+                    session_factory,
+                    instance_id=heartbeat_instance,
+                    interval_seconds=interval_seconds,
+                    details=heartbeat_details,
+                )
                 payload = result.to_dict(include_quotes=False)
                 print(
                     json.dumps(
@@ -1189,6 +1259,43 @@ async def _watch_quotes(
         engine.dispose()
         for registered_signal in registered_signals:
             loop.remove_signal_handler(registered_signal)
+
+
+def _touch_quote_watcher_heartbeat(
+    session_factory: sessionmaker[Session],
+    *,
+    instance_id: str,
+    interval_seconds: float,
+    details: dict[str, object],
+) -> bool:
+    """Best-effort heartbeat, including recovery from a locked initial registration."""
+    try:
+        with session_factory.begin() as session:
+            now = datetime.now(UTC)
+            try:
+                touch_runtime_heartbeat(
+                    session,
+                    instance_id=instance_id,
+                    now=now,
+                    details=dict(details),
+                )
+            except ValueError as exc:
+                if not str(exc).startswith("unknown runtime heartbeat instance:"):
+                    raise
+                start_runtime_heartbeat(
+                    session,
+                    service_name=QUOTE_WATCHER_SERVICE,
+                    instance_id=instance_id,
+                    interval_seconds=interval_seconds,
+                    now=now,
+                    details=dict(details),
+                )
+    except OperationalError as exc:
+        if "database is locked" not in str(exc.orig).lower():
+            raise
+        logger.warning("quote watcher heartbeat delayed by SQLite writer lock")
+        return False
+    return True
 
 
 async def _compare_quotes(

@@ -72,9 +72,11 @@ def test_daily_acceptance_passes_complete_day_and_is_idempotent(
 
     assert first == second
     assert first["verdict"] == "passed"
-    assert first["collection"]["expected_slot_count"] == 1000
+    assert first["collection"]["expected_slot_count"] == 948
     assert first["collection"]["missing_slot_count"] == 0
-    assert first["seals"]["day"]["row_count"] == 500
+    assert first["collection"]["excluded_non_continuous_collection_count"] == 52
+    assert first["collection"]["legacy_dual_collection_count"] == 0
+    assert first["seals"]["day"]["row_count"] == 480
     assert first["seals"]["day"]["valid"] is True
     with session_factory_fixture() as session:
         assert session.scalar(select(func.count()).select_from(JobRun)) == 1
@@ -84,12 +86,21 @@ def test_daily_acceptance_passes_complete_day_and_is_idempotent(
     card = build_alert_card(notification)
     assert card["schema"] == "2.0"
     assert card["header"]["template"] == "green"
-    assert "500/500" in card["body"]["elements"][0]["content"]
+    assert "480/480" in card["body"]["elements"][0]["content"]
 
     day_dir = output_root / f"trade_date={_DATE.isoformat()}"
+    wrong_pool = _assess_seals(
+        day_dir,
+        trade_date=_DATE,
+        expected_symbols={"600000.SH", "000001.SZ"},
+    )
+    assert all(
+        "symbol_set_mismatch" in wrong_pool[name]["problems"]
+        for name in ("morning", "afternoon", "day")
+    )
     with (day_dir / "day.parquet").open("ab") as handle:
         handle.write(b"corruption")
-    damaged = _assess_seals(day_dir, trade_date=_DATE, expected_symbol_count=2)
+    damaged = _assess_seals(day_dir, trade_date=_DATE, expected_symbols=set(_METADATA))
     assert damaged["day"]["valid"] is False
     assert "整日分钟文件缺失、损坏或不完整" in damaged["issues"]
 
@@ -114,7 +125,7 @@ def test_daily_acceptance_fails_when_entire_morning_is_missing(
 
     assert report["verdict"] == "failed"
     assert report["collection"]["max_missing_gap_seconds"] >= 7_200
-    assert report["collection"]["phases"][1]["missing_slot_count"] == 480
+    assert report["collection"]["phases"][0]["missing_slot_count"] == 480
     assert report["seals"]["day"]["valid"] is False
 
 

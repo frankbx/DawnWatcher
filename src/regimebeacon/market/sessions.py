@@ -30,6 +30,7 @@ class MarketPhase(StrEnum):
     MIDDAY_BREAK = "midday_break"
     AFTERNOON_CONTINUOUS = "afternoon_continuous"
     CLOSING_CALL_AUCTION = "closing_call_auction"
+    CLOSING_FINAL_QUOTE = "closing_final_quote"
     POST_CLOSE = "post_close"
 
     @property
@@ -42,7 +43,11 @@ class MarketPhase(StrEnum):
 
     @property
     def collects_quotes(self) -> bool:
-        return self.auction_mode is not AuctionMode.NONE
+        return self.auction_mode is not AuctionMode.NONE or self is self.CLOSING_FINAL_QUOTE
+
+    @property
+    def is_continuous(self) -> bool:
+        return self in {self.MORNING_CONTINUOUS, self.AFTERNOON_CONTINUOUS}
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +79,11 @@ class MarketSessionStatus:
     def collect_quotes(self) -> bool:
         return self.calendar_date_known and self.is_trading_day and self.phase.collects_quotes
 
+    @property
+    def collect_production_quotes(self) -> bool:
+        """Opening-call samples are diagnostic only; keep the official close."""
+        return self.collect_quotes and self.phase is not MarketPhase.OPENING_CALL_AUCTION
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "observed_at": self.observed_at.isoformat(),
@@ -83,6 +93,7 @@ class MarketSessionStatus:
             "is_trading_day": self.is_trading_day,
             "calendar_date_known": self.calendar_date_known,
             "collect_quotes": self.collect_quotes,
+            "collect_production_quotes": self.collect_production_quotes,
             "reason": self.reason,
         }
 
@@ -160,6 +171,8 @@ def _phase_at(value: time) -> MarketPhase:
         return MarketPhase.AFTERNOON_CONTINUOUS
     if value <= time(15, 0):
         return MarketPhase.CLOSING_CALL_AUCTION
+    if value < time(15, 0, 30):
+        return MarketPhase.CLOSING_FINAL_QUOTE
     return MarketPhase.POST_CLOSE
 
 
@@ -171,5 +184,6 @@ _PHASE_REASONS = {
     MarketPhase.MIDDAY_BREAK: "midday trading break",
     MarketPhase.AFTERNOON_CONTINUOUS: "afternoon continuous auction",
     MarketPhase.CLOSING_CALL_AUCTION: "closing call auction",
+    MarketPhase.CLOSING_FINAL_QUOTE: "brief final-price quote capture after the close",
     MarketPhase.POST_CLOSE: "after the closing call auction",
 }

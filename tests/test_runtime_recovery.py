@@ -22,6 +22,29 @@ _ZONE = ZoneInfo("Asia/Shanghai")
 _DATE = date(2026, 9, 28)
 
 
+def test_supervisor_adds_holdings_without_duplicate_pool_symbols(
+    database_settings: Settings,
+    session_factory_fixture: sessionmaker[Session],
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "data" / "private" / "holdings.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "positions": [
+                    {"symbol": "600000.SH", "name": "已有股票", "cost_cny": "10", "shares": 100},
+                    {"symbol": "002409.SZ", "name": "新持仓", "cost_cny": "100", "shares": 200},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    supervisor = _supervisor(database_settings, session_factory_fixture, tmp_path)
+    assert supervisor._symbols == ("600000.SH", "002409.SZ")
+
+
 def test_transient_sealer_attempts_survive_supervisor_restarts(
     database_settings: Settings,
     session_factory_fixture: sessionmaker[Session],

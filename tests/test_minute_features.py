@@ -7,12 +7,15 @@ from decimal import Decimal
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
+from scripts.watch_minute_sealer import missing_feature_minutes
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from regimebeacon.domain import DataQualityState, Exchange, QuoteProvider
 from regimebeacon.storage.minute_features import build_minute_features, list_minute_features
+from regimebeacon.storage.minute_parquet import MinuteTradingSession
 from regimebeacon.storage.models import (
+    AuditEvent,
     MarketCollectionRun,
     MinuteBar,
     MinuteFeature,
@@ -198,6 +201,49 @@ def test_incremental_build_uses_prior_minute_only_as_cumulative_baseline(
     assert len(bars) == 3
     assert {bar.minute_start.astimezone(_ZONE).strftime("%H:%M") for bar in bars} == {"09:30"}
     assert all(bar.volume_shares is not None for bar in bars)
+
+
+def test_sealer_only_rebuilds_missing_pool_minutes(
+    session_factory_fixture: sessionmaker[Session],
+) -> None:
+    with session_factory_fixture.begin() as session:
+        _seed_current_snapshots(session)
+        build_minute_features(
+            session,
+            trade_date=_TRADE_DATE,
+            timezone="Asia/Shanghai",
+            expected_interval_seconds=15,
+        )
+    with session_factory_fixture() as session:
+        missing = missing_feature_minutes(
+            session,
+            trade_date=_TRADE_DATE,
+            trading_session=MinuteTradingSession.MORNING,
+            timezone="Asia/Shanghai",
+            symbols={_STOCK, _MARKET, _INDUSTRY},
+        )
+
+    assert datetime(2026, 9, 28, 9, 30, tzinfo=_ZONE) not in missing
+    assert datetime(2026, 9, 28, 9, 31, tzinfo=_ZONE) in missing
+    assert len(missing) == 119
+
+
+def test_empty_minute_build_does_not_write_audit_row(
+    session_factory_fixture: sessionmaker[Session],
+) -> None:
+    with session_factory_fixture.begin() as session:
+        report = build_minute_features(
+            session,
+            trade_date=_TRADE_DATE,
+            timezone="Asia/Shanghai",
+            expected_interval_seconds=15,
+            minute_start=datetime(2026, 9, 28, 11, 30, tzinfo=_ZONE),
+        )
+    with session_factory_fixture() as session:
+        audit_count = session.scalar(select(func.count()).select_from(AuditEvent))
+
+    assert report.minute_bar_count == 0
+    assert audit_count == 0
 
 
 def _seed_relative_volume_history(session: Session) -> None:

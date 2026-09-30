@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -277,3 +278,36 @@ def test_delivery_worker_retries_sanitized_failure(
     assert result.failed == 1
     assert stored is not None and stored.status is NotificationStatus.RETRYING
     assert stored.last_error == "Feishu returned HTTP 503"
+
+
+def test_delivery_worker_drops_expired_holdings_card_without_sending(
+    session_factory_fixture: sessionmaker[Session],
+) -> None:
+    class Sender:
+        async def send(self, notification: NotificationOutbox) -> FeishuDeliveryReceipt:
+            del notification
+            raise AssertionError("expired holdings card must not reach Feishu")
+
+    with session_factory_fixture.begin() as session:
+        notification = enqueue_notification(
+            session,
+            idempotency_key="expired-holdings-card",
+            event_type="portfolio.holdings_review.completed",
+            channel="feishu",
+            recipient="portfolio_holdings",
+            payload={
+                "expires_at": (datetime.now(UTC) - timedelta(minutes=1)).isoformat(),
+                "markdown": "stale",
+            },
+        )
+
+    result = asyncio.run(
+        NotificationDeliveryWorker(session_factory_fixture, Sender()).deliver_batch(max_items=10)
+    )
+    with session_factory_fixture() as session:
+        stored = session.get(NotificationOutbox, notification.id)
+        attempts = list(session.scalars(select(NotificationAttempt)))
+    assert result.dead == 1 and result.sent == 0
+    assert stored is not None and stored.status is NotificationStatus.DEAD
+    assert stored.last_error == "notification expired before delivery"
+    assert len(attempts) == 1 and not attempts[0].success

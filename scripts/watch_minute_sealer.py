@@ -8,12 +8,17 @@ import asyncio
 import fcntl
 import json
 import os
-from datetime import date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
 from regimebeacon.config import Settings
+from regimebeacon.domain import QuoteProvider
 from regimebeacon.storage.database import create_database_engine, create_session_factory
 from regimebeacon.storage.minute_features import build_minute_features
 from regimebeacon.storage.minute_parquet import (
@@ -22,10 +27,15 @@ from regimebeacon.storage.minute_parquet import (
     merge_minute_day,
     seal_minute_session,
 )
+from regimebeacon.storage.models import MinuteBar, MinuteFeature
 
 _SEAL_TIMES = {
     MinuteTradingSession.MORNING: time(11, 32),
     MinuteTradingSession.AFTERNOON: time(15, 2),
+}
+_SESSION_MINUTE_BOUNDS = {
+    MinuteTradingSession.MORNING: (time(9, 30), time(11, 30)),
+    MinuteTradingSession.AFTERNOON: (time(13, 0), time(15, 0)),
 }
 
 
@@ -69,6 +79,46 @@ def load_industry_map(path: Path) -> dict[str, str]:
     return payload
 
 
+def missing_feature_minutes(
+    session: Session,
+    *,
+    trade_date: date,
+    trading_session: MinuteTradingSession,
+    timezone: str,
+    symbols: set[str],
+) -> list[datetime]:
+    """Find only incomplete pool minutes; normal intraday builds need no replay."""
+    zone = ZoneInfo(timezone)
+    start_clock, end_clock = _SESSION_MINUTE_BOUNDS[trading_session]
+    start = datetime.combine(trade_date, start_clock, tzinfo=zone)
+    end = datetime.combine(trade_date, end_clock, tzinfo=zone)
+    rows = session.execute(
+        select(
+            MinuteBar.minute_start,
+            func.count(MinuteBar.id),
+            func.count(MinuteFeature.id),
+        )
+        .outerjoin(MinuteFeature, MinuteFeature.minute_bar_id == MinuteBar.id)
+        .where(
+            MinuteBar.trade_date == trade_date,
+            MinuteBar.provider == QuoteProvider.TENCENT,
+            MinuteBar.symbol.in_(symbols),
+            MinuteBar.minute_start >= start.astimezone(UTC),
+            MinuteBar.minute_start < end.astimezone(UTC),
+        )
+        .group_by(MinuteBar.minute_start)
+    )
+    counts = {minute: (bar_count, feature_count) for minute, bar_count, feature_count in rows}
+    missing: list[datetime] = []
+    minute = start
+    while minute < end:
+        bars, features = counts.get(minute.astimezone(UTC), (0, 0))
+        if bars < len(symbols) or features < len(symbols):
+            missing.append(minute)
+        minute += timedelta(minutes=1)
+    return missing
+
+
 def finalize_and_seal(
     settings: Settings,
     *,
@@ -85,17 +135,30 @@ def finalize_and_seal(
     engine = create_database_engine(settings)
     try:
         factory = create_session_factory(engine)
-        with factory.begin() as database_session:
-            feature_report = build_minute_features(
+        with factory() as database_session:
+            missing_minutes = missing_feature_minutes(
                 database_session,
                 trade_date=trade_date,
+                trading_session=trading_session,
                 timezone=settings.timezone,
-                expected_interval_seconds=settings.market_poll_interval_seconds,
-                market_benchmark_symbol=market_benchmark,
-                industry_benchmarks=industry_map,
-                relative_volume_lookback_days=20,
-                relative_volume_minimum_history_days=5,
+                symbols=set(instrument_metadata),
             )
+        feature_reports = []
+        for minute_start in missing_minutes:
+            with factory.begin() as database_session:
+                feature_reports.append(
+                    build_minute_features(
+                        database_session,
+                        trade_date=trade_date,
+                        timezone=settings.timezone,
+                        expected_interval_seconds=settings.market_poll_interval_seconds,
+                        market_benchmark_symbol=market_benchmark,
+                        industry_benchmarks=industry_map,
+                        relative_volume_lookback_days=20,
+                        relative_volume_minimum_history_days=5,
+                        minute_start=minute_start,
+                    )
+                )
         with factory() as database_session:
             seal_report = seal_minute_session(
                 database_session,
@@ -111,7 +174,14 @@ def finalize_and_seal(
     return {
         "event": "market.minute_session.sealed",
         "observed_at": observed_at.isoformat(),
-        "feature_build": feature_report.to_dict(),
+        "feature_build": {
+            "mode": "targeted_catch_up",
+            "attempted_minute_count": len(missing_minutes),
+            "attempted_minutes": [value.isoformat() for value in missing_minutes],
+            "snapshot_count": sum(value.snapshot_count for value in feature_reports),
+            "minute_bar_count": sum(value.minute_bar_count for value in feature_reports),
+            "feature_count": sum(value.feature_count for value in feature_reports),
+        },
         "seal": seal_report.to_dict(),
     }
 
@@ -136,6 +206,7 @@ async def run(args: argparse.Namespace) -> None:
         await asyncio.sleep(max(0.0, (due - datetime.now(zone)).total_seconds()))
         observed_at = datetime.now(zone)
         seal_succeeded = False
+        seal_started = perf_counter()
         try:
             payload = await asyncio.to_thread(
                 finalize_and_seal,
@@ -149,6 +220,7 @@ async def run(args: argparse.Namespace) -> None:
                 observed_at=observed_at,
             )
             seal_succeeded = True
+            payload["duration_ms"] = round((perf_counter() - seal_started) * 1000, 1)
             if not payload["seal"]["complete"]:
                 incomplete = True
                 payload["event"] = "market.minute_session.sealed_incomplete"
@@ -164,6 +236,7 @@ async def run(args: argparse.Namespace) -> None:
                 "session": trading_session.value,
                 "error_type": type(exc).__name__,
                 "error": str(exc),
+                "duration_ms": round((perf_counter() - seal_started) * 1000, 1),
             }
         results.append(payload)
         print(json.dumps(payload, ensure_ascii=False), flush=True)

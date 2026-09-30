@@ -319,6 +319,7 @@ class ProviderQuoteSnapshot(Base):
             "quote_at",
             "provider",
         ),
+        Index("ix_provider_quote_snapshot_provider_fetched", "provider", "fetched_at"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -431,6 +432,7 @@ class MinuteBar(TimestampMixin, Base):
         ),
         Index("ix_minute_bar_symbol_trade_time", "symbol", "trade_date", "minute_start"),
         Index("ix_minute_bar_trade_time", "trade_date", "minute_start"),
+        Index("ix_minute_bar_provider_start", "provider", "minute_start"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)

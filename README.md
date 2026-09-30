@@ -44,6 +44,14 @@ Install the optional Parquet writer when this host is responsible for minute-dat
 python -m pip install -e '.[dev,parquet]'
 ```
 
+For ad-hoc AkShare/Sina historical-minute downloads, install the separate
+`historical-minutes` extra in a non-live environment. It is not required by the
+Tencent real-time watcher:
+
+```bash
+python -m pip install -e '.[historical-minutes]'
+```
+
 Copy `.env.example` to `.env` only when local overrides are needed. Defaults are safe for
 development. Put the Tushare credential alone in a project-root file named `token` and set
 its permissions to `0600`. The file is excluded from version control and its contents are
@@ -97,7 +105,7 @@ normalized to uppercase Tushare `ts_code` values such as `600000.SH`,
 inputs and archive-replay compatibility, but all application output and persisted data use
 the Tushare form.
 
-`quotes watch` starts immediately and then collects on a configurable fixed cadence. The
+`quotes watch` starts immediately when invoked manually and then collects on a configurable fixed cadence; the unattended supervisor starts it at 09:30. The
 default interval is 15 seconds and can be changed with
 `REGIMEBEACON_MARKET_POLL_INTERVAL_SECONDS` or overridden for one process with `--interval`.
 Runs never overlap: if collection exceeds the interval, elapsed schedule slots are skipped.
@@ -116,30 +124,38 @@ exact match is `<= max(0.01, reference * 0.0002)`, near is `<= max(0.03, referen
 and larger differences are conflicts. The diagnostic path is deliberately not used by the
 Tencent-only production watcher.
 
-Both `quotes collect` and `quotes watch` call Tencent only during active auction phases on
-dates marked open by Tushare:
+Production `quotes collect` and `quotes watch` call Tencent only from the start of
+continuous trading and through the official close on dates marked open by Tushare:
 
-- 09:15:00 ≤ t ≤ 09:25:00: `opening_call_auction`
+- 09:15:00 ≤ t ≤ 09:25:00: `opening_call_auction` (no production collection)
 - 09:25:00 < t < 09:30:00: `opening_pause` (no collection)
 - 09:30:00 ≤ t ≤ 11:30:00: `morning_continuous`
 - 11:30:00 < t < 13:00:00: `midday_break` (no collection)
 - 13:00:00 ≤ t < 14:57:00: `afternoon_continuous`
-- 14:57:00 ≤ t ≤ 15:00:00: `closing_call_auction`
+- 14:57:00 ≤ t ≤ 15:00:00: `closing_call_auction` (retain closing prices)
+- 15:00:00 < t < 15:00:30: `closing_final_quote` (final-price capture only;
+  excluded from continuous-trading statistics)
 
-If a scheduler tick lands exactly at 09:25, 11:30, or 15:00, it remains part of the preceding
-active phase. Collections persist `market_phase` and expose `auction_mode` so call-auction
-snapshots cannot be mistaken for continuous-auction observations. Non-trading ticks are
-reported as scheduler skips and generate no Tencent HTTP traffic.
+To check the opening call auction without writing quote snapshots or raw archives, run
+`regimebeacon quotes probe-opening 600000.SH 510300.SH` during 09:15–09:25. Outside
+that phase the command skips the request. If a scheduler tick lands exactly at 11:30
+or 15:00, it remains part of the preceding active phase. The brief post-close
+capture window allows a 15-second tick offset from the wall-clock boundary to
+record the officially published final quote. Persisted collections carry
+`market_phase` so closing-auction snapshots cannot be mistaken for continuous trading.
+Non-trading ticks generate no Tencent HTTP traffic.
 
 The collector uses bounded request timeouts, batches of at most 50 symbols by default, and an
 in-process Tencent circuit breaker. There are no aggressive automatic HTTP retries. A valid
 Tencent quote is `complete`; missing, stale, or invalid values are blocked from downstream
 strategy code.
 
-`quotes stats` reports Tencent's complete-run success rate, valid-quote coverage,
+`quotes stats` reports Tencent's continuous-trading complete-run success rate, valid-quote coverage,
 average/p50/p95/max collection latency, circuit-open and circuit-suppression counts,
-quality-state counts, and within-session collection gaps. Historical dual-source rows are
-reported separately and do not contaminate current single-source metrics.
+quality-state counts, and within-session collection gaps. Opening and closing call-auction
+rows, if present, are excluded from these rates; the close remains available for
+the final price and minute-line seal. Historical dual-source rows are reported
+separately and do not contaminate current single-source metrics.
 
 `features build` is an idempotent materialization step over validated Tencent snapshots. It
 creates `minute_bar` and `minute_feature` rows; rerunning it updates the same provider/symbol/
@@ -192,7 +208,7 @@ columns. The two session partitions remain as recovery checkpoints. If either so
 is incomplete, the daily file is still auditable but is also marked `complete: false`.
 
 For unattended session-close operation, run the wrapper below under the same process
-supervisor as the collectors. It rebuilds the final minute features, seals the morning
+supervisor as the collectors. It rebuilds only missing or incomplete minute features, seals the morning
 partition at 11:32 and the afternoon partition at 15:02, then publishes `day.parquet`. It
 exits non-zero if a session or daily seal fails or is incomplete:
 
@@ -207,8 +223,9 @@ locally cached Tushare calendar (refreshing it at most once per day), does nothi
 non-trading days, and reconciles child processes every five seconds on an open date:
 
 - 08:50: start operational monitoring and durable Feishu outbox delivery;
-- 09:14:30: start the 15-second Tencent watcher, minute analysis, and session sealer;
-- 09:15: begin aligned 15-minute status reports;
+- 09:14:30: start the session sealer, which waits for its post-session deadlines;
+- 09:30: start the 15-second Tencent watcher and minute analysis; begin aligned
+  15-minute status reports and, if configured, separate holdings review cards;
 - 11:32: seal the morning minute partition;
 - 15:00:30: stop quote collection after the inclusive 15:00 tick;
 - 15:01: stop market-analysis and status-report processes;
@@ -221,6 +238,9 @@ non-trading days, and reconciles child processes every five seconds on an open d
 The supervisor uses an advisory lock so two instances cannot collect the same pool. A failed
 continuous service is restarted after ten seconds. Daily analysis/report services receive up
 to three attempts, and a terminal failure is written to the notification outbox. If the host
+or analysis worker restarts during trading, the per-minute analysis resumes without an
+immediate full-day SQLite rebuild; the post-session sealer performs catch-up before sealing.
+If the host
 or supervisor starts late, the minute sealer can catch up until 23:50. Its per-date result
 marker preserves retry counts across supervisor restarts: incomplete market data is a final
 result, whereas transient sealing failures receive up to three attempts. An unknown trading
@@ -232,12 +252,13 @@ concurrent Parquet writes if an old child survives an unexpected supervisor exit
 `data/reports/runtime/YYYY-MM-DD/`; the supervisor log remains under `data/reports/`.
 
 `acceptance run` is automatically scheduled once the sealer reaches a terminal result, including
-an incomplete result. It checks expected 15-second slots across the opening call auction,
-morning continuous auction, afternoon continuous auction, and closing call auction; Tencent
+an incomplete result. It checks 948 expected 15-second slots across morning and afternoon
+continuous trading only; Tencent
 valid-quote coverage, complete-run rate, P95 latency, circuit trips, and the full stock-pool
-coverage; and both session Parquet partitions plus the merged day file. A complete ordinary
-trading day has 130 morning and 120 afternoon minute timestamps (250 total), including the
-opening call auction. The report is written atomically to
+coverage; and both session Parquet partitions plus the merged day file. New sealed days
+have 120 morning and 120 afternoon minute timestamps (240 total), excluding the opening
+call auction but retaining the official close. Legacy 250-minute seals remain readable.
+The report is written atomically to
 `data/reports/daily/YYYY-MM-DD/acceptance.json`, recorded as an idempotent `job_run`, and
 queued once as a Feishu Card 2.0 verdict. A failed data-quality verdict is a completed
 assessment, not a command crash. The default thresholds are 99.5% valid quotes, 99% complete
@@ -261,7 +282,7 @@ launchctl bootout "gui/$(id -u)/com.regimebeacon.runtime"
 ```
 
 `scripts/watch_market_analysis.py` runs that materialization incrementally: eight seconds after
-each wall-clock minute it rebuilds only the just-completed minute, using the preceding minute as
+each retained trading minute it rebuilds only the just-completed minute, using the preceding minute as
 the cumulative volume/amount baseline. On each 15-minute boundary it sends a Feishu Card JSON
 2.0 overview containing an auditable intraday market temperature, the 沪深300 rolling return,
 daily and rolling breadth for the 320 fixed representative stocks, and ranked sector strength
@@ -272,6 +293,9 @@ the opening gap is being confirmed or reversed and treats that result as a risk 
 an independent buy signal. The 40 dynamic observers are excluded from breadth to avoid selection
 bias. Sector warming/cooling compares the current 15-minute window with the preceding window;
 missing history, partial ETF proxies, and sample-only breadth remain explicit in the output.
+The worker skips opening and midday empty minutes, does not replay a full day on startup by
+default, and records each feature-build duration. `--rebuild-on-start` explicitly enables the
+expensive full-day repair for a controlled maintenance run.
 
 For a bounded intraday run:
 
@@ -280,10 +304,13 @@ For a bounded intraday run:
   --until 2026-09-29T15:00:00+08:00
 ```
 
-`quotes watch` writes a durable heartbeat on every scheduler tick and after every collection.
-Run `monitor watch` as a separate supervised process so a dead or stalled quote watcher can be
-detected. The monitor checks quote-watcher heartbeat freshness, usable-collection freshness
-during active auction phases, and free space on the runtime data filesystem. Alerts are
+`quotes watch` writes a durable heartbeat after each collection and on skipped scheduler ticks.
+A temporary SQLite writer lock on the heartbeat does not discard an otherwise collectible quote
+round; registration is retried on the next tick. Run `monitor watch` as a separate supervised
+process so a dead or stalled quote watcher can be detected. Monitoring ignores orphaned running
+heartbeats from prior trading days and allows a bounded startup/restart grace after a clean stop
+or when a fresh quote collection proves the watcher is active. It checks collection freshness
+only during continuous auction and also checks free space on the runtime data filesystem. Alerts are
 stateful: the first observation, severity escalation, and recovery are each enqueued once in
 the transactional notification outbox.
 
@@ -303,6 +330,57 @@ Defaults are a 30-second monitor cadence, a 60-second stale-heartbeat threshold,
 collection-gap threshold, a 5 GiB disk warning, and a 1 GiB disk critical alert. They can be
 changed with the corresponding `REGIMEBEACON_MONITOR_*`, `REGIMEBEACON_HEARTBEAT_*`,
 `REGIMEBEACON_COLLECTION_GAP_*`, and `REGIMEBEACON_DISK_*` settings shown in `.env.example`.
+
+## Private holdings review
+
+`data/private/holdings.json` is a local, git-ignored file containing Tushare-format
+codes, names, per-share cost in yuan, and share counts. Keep it at permission `0600`.
+When present at supervisor startup, held symbols are added to the Tencent quote watcher
+without duplicating symbols already in the market pool. They remain outside the fixed
+market-breadth sample and its Parquet completeness denominator. After a trade, update this
+file and restart the supervisor; the system does not infer executions from prices.
+
+`scripts/watch_holdings.py` queues a separate Feishu Card JSON 2.0 review every
+five minutes from 09:35 through 11:30 and 13:05 through 15:00, 40 seconds after
+each boundary. The opening auction and lunch break are excluded from the window.
+The notification outbox deduplicates each trading-date/slot and retries delivery;
+cards expire at the next slot so yesterday's advice cannot arrive the next morning.
+The card includes current price, day and five-minute moves, relative move against the
+沪深300 ETF, cost-based unrealized P/L, and an explicit rule-based action suggestion
+for each holding. Quotes
+older than 90 seconds or carrying validation issues suppress valuation and guidance;
+the opening auction is not compared with continuous trading. P/L excludes fees,
+taxes, dividends, and later trades. Prompts do not place orders and are not a substitute
+for a user-defined risk plan.
+Price-move thresholds use the same window as the card: the original 15-minute
+0.5%/1.0% bands become 0.3%/0.6% at five minutes via a rounded square-root-of-time
+heuristic. The 5% cost-loss and 1.5× historical same-window volume thresholds stay
+unchanged. These are transparent review triggers, not backtested trade signals.
+
+The separate AkShare/Sina history for the five held symbols is under
+`data/lake/akshare_sina_full_day/holdings_as_of=2026-09-29/`. Each complete-day file
+preserves the provider's original end label, a start/end interval, a distinct
+14:57–15:00 closing-auction record, and 09:30/15:00 price points. To refresh in a
+historical-minute environment, choose a new output directory:
+
+```bash
+python scripts/download_akshare_sina_full_days.py \
+  --symbol-file data/private/holdings.json \
+  --output data/lake/akshare_sina_full_day/holdings_as_of=YYYY-MM-DD
+```
+
+The holdings watcher automatically selects the newest matching `holdings_as_of=*`
+directory and compares its last five to eight **prior, complete trading days** with
+the current 15-minute slot. Each card shows the same-clock historical median return,
+the current return's percentage-point difference, and current Tencent volume divided
+by the historical Sina median volume. The 09:30–09:45 opening window omits the volume
+ratio because opening-auction volume allocation is not confirmed. A historical window
+must be contiguous and contain at least five days; references older than 21 calendar
+days are disabled. Missing/old history degrades the card explicitly without stopping
+real-time monitoring. Cross-provider volume ratios are approximate, not trade signals.
+The 15:00 card requires a quote timestamp at or after 15:00; an auction-period quote
+before the final match is marked "收盘价未确认" and suppresses final advice.
+The runtime only reads local Parquet files; AkShare is never called during trading.
 
 ## Quality checks
 

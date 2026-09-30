@@ -6,8 +6,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -48,7 +49,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-initial-report",
         action="store_true",
-        help="Build existing minute features without immediately sending a report.",
+        help="Retained for compatibility; safe startup without a full-day rebuild is now the default.",
+    )
+    parser.add_argument(
+        "--rebuild-on-start",
+        action="store_true",
+        help="Explicit offline repair: rebuild the full day before aligned minute builds.",
     )
     return parser.parse_args()
 
@@ -105,6 +111,7 @@ async def send_overview(
     market_benchmark: str,
     window_minutes: int,
 ) -> dict[str, Any]:
+    build_started = perf_counter()
     engine = create_database_engine(settings)
     try:
         with create_session_factory(engine)() as session:
@@ -118,14 +125,22 @@ async def send_overview(
             )
     finally:
         engine.dispose()
+    build_duration_ms = round((perf_counter() - build_started) * 1000, 1)
     markdown = format_market_overview_markdown(overview)
+    send_started = perf_counter()
     receipt = await client.send_card(
-        build_market_analysis_card(markdown, direction=overview.temperature.label)
+        build_market_analysis_card(
+            markdown,
+            direction=overview.temperature.label,
+            report=overview.to_dict(),
+        )
     )
     return {
         "event": "market.analysis.sent",
         "observed_at": observed_at.isoformat(),
         "provider_message_id": receipt.provider_message_id,
+        "build_duration_ms": build_duration_ms,
+        "delivery_duration_ms": round((perf_counter() - send_started) * 1000, 1),
         "overview": overview.to_dict(),
     }
 
@@ -135,6 +150,23 @@ def next_minute_build_at(now: datetime) -> datetime:
     return now.replace(second=8, microsecond=0) + (
         timedelta(minutes=1) if now.second >= 8 else timedelta()
     )
+
+
+def is_sealable_minute(value: datetime) -> bool:
+    """Only build minutes belonging to a session retained in daily Parquet."""
+    clock = value.time()
+    return time(9, 30) <= clock < time(11, 30) or time(13, 0) <= clock < time(15, 0)
+
+
+def next_session_build_at(due: datetime) -> datetime:
+    """Jump over opening and lunch instead of doing empty database work each minute."""
+    target = due - timedelta(minutes=1)
+    clock = target.time()
+    if clock < time(9, 30):
+        return due.replace(hour=9, minute=31, second=8, microsecond=0)
+    if time(11, 30) <= clock < time(13, 0):
+        return due.replace(hour=13, minute=1, second=8, microsecond=0)
+    return due
 
 
 async def run(args: argparse.Namespace) -> None:
@@ -150,26 +182,34 @@ async def run(args: argparse.Namespace) -> None:
         settings.feishu_signing_secret_file,
     )
     now = datetime.now(zone)
-    initial_features = await asyncio.to_thread(
-        build_features,
-        settings,
-        trade_date=now,
-        market_benchmark=args.market_benchmark,
-        industry_map=industry_map,
-        minute_start=None,
-    )
-    print(
-        json.dumps(
-            {"event": "market.minute_features.initialized", "report": initial_features},
-            ensure_ascii=False,
-        ),
-        flush=True,
-    )
+    rebuild_on_start = bool(getattr(args, "rebuild_on_start", False))
+    if rebuild_on_start and args.no_initial_report:
+        raise ValueError("--rebuild-on-start and --no-initial-report are mutually exclusive")
+    if not rebuild_on_start:
+        # A full-day write transaction while the quote watcher is active can
+        # block its SQLite inserts. The post-session sealer does the catch-up.
+        print(json.dumps({"event": "market.minute_features.initial_rebuild.skipped"}), flush=True)
+    else:
+        initial_features = await asyncio.to_thread(
+            build_features,
+            settings,
+            trade_date=now,
+            market_benchmark=args.market_benchmark,
+            industry_map=industry_map,
+            minute_start=None,
+        )
+        print(
+            json.dumps(
+                {"event": "market.minute_features.initialized", "report": initial_features},
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
     async with FeishuWebhookClient(
         credentials,
         timeout_seconds=settings.feishu_request_timeout_seconds,
     ) as client:
-        if not args.no_initial_report:
+        if rebuild_on_start:
             payload = await send_overview(
                 client,
                 settings,
@@ -183,9 +223,25 @@ async def run(args: argparse.Namespace) -> None:
         due = next_minute_build_at(datetime.now(zone))
         final_due = until.replace(second=8, microsecond=0)
         while due <= final_due:
+            next_session_due = next_session_build_at(due)
+            if next_session_due != due:
+                print(
+                    json.dumps(
+                        {
+                            "event": "market.minute_features.paused",
+                            "resume_at": next_session_due.isoformat(),
+                        }
+                    ),
+                    flush=True,
+                )
+                due = next_session_due
+                continue
             await asyncio.sleep(max(0.0, (due - datetime.now(zone)).total_seconds()))
             target_minute = due.replace(second=0, microsecond=0) - timedelta(minutes=1)
+            if not is_sealable_minute(target_minute):
+                break
             try:
+                started = perf_counter()
                 feature_report = await asyncio.to_thread(
                     build_features,
                     settings,
@@ -199,6 +255,7 @@ async def run(args: argparse.Namespace) -> None:
                         {
                             "event": "market.minute_features.completed",
                             "minute_start": target_minute.isoformat(),
+                            "duration_ms": round((perf_counter() - started) * 1000, 1),
                             "report": feature_report,
                         },
                         ensure_ascii=False,
@@ -228,7 +285,20 @@ async def run(args: argparse.Namespace) -> None:
                     ),
                     flush=True,
                 )
-            due += timedelta(minutes=1)
+            next_due = due + timedelta(minutes=1)
+            resume_due = next_minute_build_at(datetime.now(zone))
+            if next_due < resume_due:
+                print(
+                    json.dumps(
+                        {
+                            "event": "market.minute_features.backlog_skipped",
+                            "from_due": next_due.isoformat(),
+                            "resume_at": resume_due.isoformat(),
+                        }
+                    ),
+                    flush=True,
+                )
+            due = max(next_due, resume_due)
 
 
 def main() -> None:

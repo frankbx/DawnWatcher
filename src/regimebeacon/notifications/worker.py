@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from typing import Protocol
 
 from sqlalchemy.orm import Session, sessionmaker
@@ -10,6 +11,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from regimebeacon.notifications.feishu import FeishuDeliveryError, FeishuDeliveryReceipt
 from regimebeacon.notifications.outbox import (
     claim_next_notification,
+    mark_notification_expired,
     mark_notification_failed,
     mark_notification_sent,
     recover_stale_notifications,
@@ -81,6 +83,15 @@ class NotificationDeliveryWorker:
             if claim is None:
                 break
             claimed += 1
+            if _is_expired(claim.notification):
+                with self.session_factory.begin() as session:
+                    mark_notification_expired(
+                        session,
+                        notification_id=claim.notification.id,
+                        lock_token=claim.lock_token,
+                    )
+                dead += 1
+                continue
             try:
                 receipt = await self.sender.send(claim.notification)
             except FeishuDeliveryError as exc:
@@ -132,3 +143,18 @@ class NotificationDeliveryWorker:
                 retry_delay_seconds=retry_delay,
             )
             return failed_notification.status.value == "dead"
+
+
+def _is_expired(notification: NotificationOutbox) -> bool:
+    value = notification.payload.get("expires_at")
+    if value is None:
+        return False
+    if not isinstance(value, str):
+        return True
+    try:
+        expires_at = datetime.fromisoformat(value)
+    except ValueError:
+        return True
+    if expires_at.tzinfo is None or expires_at.utcoffset() is None:
+        return True
+    return datetime.now(UTC) >= expires_at.astimezone(UTC)

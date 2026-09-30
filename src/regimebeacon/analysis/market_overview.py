@@ -204,26 +204,30 @@ def build_market_overview(
     previous_at = comparison_at - timedelta(minutes=window_minutes)
     symbols = {member.symbol for member in members}
     query_start = previous_at - _MAX_POINT_DISTANCE
-    rows = list(
-        session.scalars(
-            select(ProviderQuoteSnapshot)
-            .where(
-                ProviderQuoteSnapshot.provider == provider,
-                ProviderQuoteSnapshot.symbol.in_(symbols),
-                ProviderQuoteSnapshot.fetched_at >= query_start.astimezone(UTC),
-                ProviderQuoteSnapshot.fetched_at <= observed_at.astimezone(UTC),
-            )
-            .order_by(ProviderQuoteSnapshot.symbol, ProviderQuoteSnapshot.fetched_at)
+    rows = session.execute(
+        select(
+            ProviderQuoteSnapshot.symbol,
+            ProviderQuoteSnapshot.fetched_at,
+            ProviderQuoteSnapshot.open,
+            ProviderQuoteSnapshot.latest,
+            ProviderQuoteSnapshot.previous_close,
         )
+        .where(
+            ProviderQuoteSnapshot.provider == provider,
+            ProviderQuoteSnapshot.symbol.in_(symbols),
+            ProviderQuoteSnapshot.fetched_at >= query_start.astimezone(UTC),
+            ProviderQuoteSnapshot.fetched_at <= observed_at.astimezone(UTC),
+        )
+        .order_by(ProviderQuoteSnapshot.fetched_at)
     )
     points: dict[str, list[_Point]] = defaultdict(list)
-    for row in rows:
-        points[row.symbol].append(
+    for symbol, fetched_at, open_price, latest, previous_close in rows:
+        points[symbol].append(
             _Point(
-                fetched_at=row.fetched_at.astimezone(zone),
-                open=row.open,
-                latest=row.latest,
-                previous_close=row.previous_close,
+                fetched_at=fetched_at.astimezone(zone),
+                open=open_price,
+                latest=latest,
+                previous_close=previous_close,
             )
         )
     moves = {
@@ -721,12 +725,12 @@ def format_market_overview_markdown(report: MarketOverview) -> str:
     daily = report.fixed_sample_daily_breadth
     temperature = report.temperature
     temperature_score = (
-        f"{temperature.score:.1f}/100" if temperature.score is not None else "无数据"
+        f"{temperature.score:.2f}/100" if temperature.score is not None else "无数据"
     )
     lines = [
         (
             f"**市场温度**：{temperature.label}（{temperature_score}，"
-            f"置信度 {temperature.confidence_pct:.1f}%）"
+            f"信号一致性 {temperature.confidence_pct:.2f}%）"
         ),
         f"**风险动作**：{temperature.posture}",
         "**温度依据**：" + "；".join(temperature.evidence),

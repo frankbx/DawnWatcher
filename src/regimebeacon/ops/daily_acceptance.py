@@ -27,10 +27,8 @@ from regimebeacon.storage.models import JobRun, MarketCollectionRun
 from regimebeacon.workflows.job_runs import create_job_run, transition_job
 
 _PHASE_WINDOWS = (
-    ("opening_call_auction", time(9, 15), time(9, 25)),
     ("morning_continuous", time(9, 30), time(11, 30)),
     ("afternoon_continuous", time(13, 0), time(14, 57)),
-    ("closing_call_auction", time(14, 57), time(15, 0)),
 )
 _REPORT_SCHEMA = 1
 
@@ -124,7 +122,7 @@ def _run_daily_acceptance_locked(
         seal_report = _assess_seals(
             settings.data_dir / "lake" / "minute_market" / f"trade_date={trade_date.isoformat()}",
             trade_date=trade_date,
-            expected_symbol_count=len(expected_symbols),
+            expected_symbols=expected_symbols,
         )
         failures: list[str] = []
         warnings: list[str] = []
@@ -208,7 +206,8 @@ def _run_daily_acceptance_locked(
                     "max_missing_gap_seconds": collection_report["max_missing_gap_seconds"],
                     "day_complete": seal_report["day"]["complete"],
                     "day_row_count": seal_report["day"]["row_count"],
-                    "expected_day_row_count": len(expected_symbols) * 250,
+                    "expected_day_row_count": len(expected_symbols)
+                    * (seal_report["day"].get("expected_minute_count") or 240),
                 },
             )
         return report
@@ -239,7 +238,14 @@ def _assess_collections(
     expected_symbols: set[str],
     interval_seconds: float,
 ) -> dict[str, Any]:
-    single_source = [item for item in collections if set(item.provider_summaries) == {"tencent"}]
+    continuous_collections = [
+        item
+        for item in collections
+        if item.market_phase is not None and item.market_phase.is_continuous
+    ]
+    single_source = [
+        item for item in continuous_collections if set(item.provider_summaries) == {"tencent"}
+    ]
     requested_symbols: set[str] = set()
     successful = valid_quotes = requested_quotes = circuit_opened = 0
     latencies: list[float] = []
@@ -305,7 +311,8 @@ def _assess_collections(
     p95 = ordered_latencies[math.ceil(len(ordered_latencies) * 0.95) - 1] if latencies else None
     return {
         "collection_count": len(single_source),
-        "legacy_dual_collection_count": len(collections) - len(single_source),
+        "legacy_dual_collection_count": len(continuous_collections) - len(single_source),
+        "excluded_non_continuous_collection_count": len(collections) - len(continuous_collections),
         "pool_symbol_count": len(requested_symbols & expected_symbols),
         "unexpected_symbols": sorted(requested_symbols - expected_symbols),
         "expected_slot_count": sum(row["expected_slots"] for row in phase_reports),
@@ -329,7 +336,7 @@ def _assess_collections(
     }
 
 
-def _assess_seals(day_dir: Path, *, trade_date: date, expected_symbol_count: int) -> dict[str, Any]:
+def _assess_seals(day_dir: Path, *, trade_date: date, expected_symbols: set[str]) -> dict[str, Any]:
     issues: list[str] = []
     sessions: dict[str, dict[str, Any]] = {}
     for name in ("morning", "afternoon"):
@@ -337,8 +344,8 @@ def _assess_seals(day_dir: Path, *, trade_date: date, expected_symbol_count: int
             day_dir / f"session={name}" / "manifest.json",
             day_dir / f"session={name}" / "part-000.parquet",
             trade_date=trade_date,
-            expected_symbol_count=expected_symbol_count,
-            expected_minute_count=130 if name == "morning" else 120,
+            expected_symbols=expected_symbols,
+            expected_minute_counts=(120, 130) if name == "morning" else (120,),
         )
         if not sessions[name]["valid"]:
             issues.append(f"{name} 分钟分区缺失、损坏或不完整")
@@ -346,13 +353,17 @@ def _assess_seals(day_dir: Path, *, trade_date: date, expected_symbol_count: int
         day_dir / "day-manifest.json",
         day_dir / "day.parquet",
         trade_date=trade_date,
-        expected_symbol_count=expected_symbol_count,
-        expected_minute_count=250,
-        check_unique_keys=True,
+        expected_symbols=expected_symbols,
+        expected_minute_counts=(240, 250),
     )
     if not day["valid"]:
         issues.append("整日分钟文件缺失、损坏或不完整")
     if day["valid"]:
+        expected_from_sessions = sum(
+            sessions[name].get("expected_minute_count") or 0 for name in ("morning", "afternoon")
+        )
+        if day.get("expected_minute_count") != expected_from_sessions:
+            issues.append("整日文件的预期分钟数与分区不一致")
         source_rows = day.get("source_sessions", [])
         for name in ("morning", "afternoon"):
             match = next(
@@ -378,9 +389,8 @@ def _validate_partition(
     parquet_path: Path,
     *,
     trade_date: date,
-    expected_symbol_count: int,
-    expected_minute_count: int,
-    check_unique_keys: bool = False,
+    expected_symbols: set[str],
+    expected_minute_counts: tuple[int, ...],
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
         "valid": False,
@@ -396,18 +406,23 @@ def _validate_partition(
         problems.append("missing_file")
         return result
     try:
+        expected_symbol_count = len(expected_symbols)
         payload = json.loads(manifest_path.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
             raise ValueError("manifest must be an object")
         result["complete"] = payload.get("complete") is True
         result["row_count"] = payload.get("row_count")
+        result["expected_minute_count"] = payload.get("expected_minute_count")
         result["parquet_sha256"] = payload.get("parquet_sha256")
         result["source_sessions"] = payload.get("source_sessions", [])
+        expected_minute_count = payload.get("expected_minute_count")
+        if expected_minute_count not in expected_minute_counts:
+            problems.append("expected_minute_count_mismatch")
+            return result
         for field, expected in (
             ("trade_date", trade_date.isoformat()),
             ("schema_version", PARQUET_SCHEMA_VERSION),
             ("expected_symbol_count", expected_symbol_count),
-            ("expected_minute_count", expected_minute_count),
             ("row_count", expected_symbol_count * expected_minute_count),
             ("minute_count", expected_minute_count),
             ("symbol_count", expected_symbol_count),
@@ -428,13 +443,18 @@ def _validate_partition(
         parquet_file = parquet_module.ParquetFile(parquet_path)
         if parquet_file.metadata.num_rows != payload.get("row_count"):
             problems.append("parquet_row_count_mismatch")
-        if check_unique_keys:
-            table = parquet_file.read(columns=["provider", "symbol", "minute_start"])
-            keys = set(
-                zip(*(table.column(name).to_pylist() for name in table.column_names), strict=True)
-            )
-            if len(keys) != table.num_rows:
-                problems.append("duplicate_minute_keys")
+        table = parquet_file.read(columns=["provider", "symbol", "minute_start"])
+        providers = table.column("provider").to_pylist()
+        symbols = table.column("symbol").to_pylist()
+        minutes = table.column("minute_start").to_pylist()
+        if set(providers) != {"tencent"}:
+            problems.append("provider_mismatch")
+        if set(symbols) != expected_symbols:
+            problems.append("symbol_set_mismatch")
+        if len(set(minutes)) != expected_minute_count:
+            problems.append("parquet_minute_count_mismatch")
+        if len(set(zip(providers, symbols, minutes, strict=True))) != table.num_rows:
+            problems.append("duplicate_minute_keys")
     except Exception as exc:
         problems.append(f"validation_error:{type(exc).__name__}")
     result["valid"] = not problems

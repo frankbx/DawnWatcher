@@ -40,6 +40,32 @@ def test_runtime_plans_full_trading_day_services(tmp_path: Path) -> None:
     assert sealer.restart_policy == "on_failure"
 
 
+def test_runtime_plans_separate_holdings_card_when_configured(tmp_path: Path) -> None:
+    now = datetime(2026, 9, 30, 9, 30, tzinfo=_ZONE)
+    settings = Settings(data_dir=tmp_path / "data", _env_file=None)
+    status = ChinaAStockCalendar({_TRADE_DATE: True}).status_at(now)
+    holdings = tmp_path / "holdings.json"
+    plans = build_runtime_service_plans(
+        settings=settings,
+        status=status,
+        local_now=now,
+        project_root=tmp_path,
+        pool_file=tmp_path / "pool.json",
+        industry_map_file=tmp_path / "industry.json",
+        symbols=("600000.SH", "002409.SZ"),
+        market_benchmark="510300.SH",
+        analysis_window_minutes=5,
+        status_interval_minutes=15,
+        holdings_file=holdings,
+    )
+    card = next(plan for plan in plans if plan.name == "holdings_report")
+    assert card.command[1].endswith("watch_holdings.py")
+    assert card.command[card.command.index("--holdings-file") + 1] == str(holdings)
+    assert card.command[card.command.index("--interval-minutes") + 1] == "5"
+    assert card.stop_at == datetime(2026, 9, 30, 15, 1, tzinfo=_ZONE)
+    assert "002409.SZ" in next(plan for plan in plans if plan.name == "quote_watcher").command
+
+
 def test_runtime_does_nothing_on_closed_date(tmp_path: Path) -> None:
     plans = _plans(
         tmp_path,
@@ -142,7 +168,21 @@ def test_runtime_has_no_services_before_preflight(tmp_path: Path) -> None:
             9,
             14,
             30,
-            {"quote_watcher", "monitor", "notification_worker", "market_analysis", "minute_sealer"},
+            {"monitor", "notification_worker", "minute_sealer"},
+        ),
+        (9, 29, 59, {"monitor", "notification_worker", "minute_sealer"}),
+        (
+            9,
+            30,
+            0,
+            {
+                "quote_watcher",
+                "monitor",
+                "notification_worker",
+                "market_analysis",
+                "market_status",
+                "minute_sealer",
+            },
         ),
         (
             15,

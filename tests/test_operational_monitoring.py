@@ -62,7 +62,11 @@ def test_heartbeat_alert_is_deduplicated_and_resolved(
     market_status = ChinaAStockCalendar({date(2026, 9, 28): True}).status_at(now)
     disk = lambda path: DiskUsage(10_000, 1_000, 9_000)  # noqa: E731
     settings = database_settings.model_copy(
-        update={"disk_critical_free_bytes": 100, "disk_warning_free_bytes": 200}
+        update={
+            "collection_gap_seconds": 120,
+            "disk_critical_free_bytes": 100,
+            "disk_warning_free_bytes": 200,
+        }
     )
 
     with session_factory_fixture.begin() as session:
@@ -73,8 +77,8 @@ def test_heartbeat_alert_is_deduplicated_and_resolved(
                 expected_trade_date=market_status.trade_date,
                 market_phase=market_status.phase,
                 requested_symbols=["600000.SH"],
-                started_at=now - timedelta(seconds=2),
-                finished_at=now - timedelta(seconds=1),
+                started_at=now - timedelta(seconds=91),
+                finished_at=now - timedelta(seconds=90),
                 provider_summaries={},
                 quality_counts={"complete": 1},
             )
@@ -127,6 +131,139 @@ def test_heartbeat_alert_is_deduplicated_and_resolved(
     assert alert is not None and alert.status == "resolved"
 
 
+def test_restart_uses_recent_collection_without_previous_day_orphan_heartbeat(
+    database_settings: Settings,
+    session_factory_fixture: sessionmaker[Session],
+) -> None:
+    observed = datetime(2026, 9, 30, 2, 39, 18, tzinfo=UTC)
+    market_status = ChinaAStockCalendar({date(2026, 9, 30): True}).status_at(observed)
+    settings = database_settings.model_copy(
+        update={
+            "collection_gap_seconds": 120,
+            "disk_critical_free_bytes": 100,
+            "disk_warning_free_bytes": 200,
+        }
+    )
+    disk = lambda path: DiskUsage(10_000, 1_000, 9_000)  # noqa: E731
+    with session_factory_fixture.begin() as session:
+        start_runtime_heartbeat(
+            session,
+            service_name="quote_watcher",
+            instance_id="orphaned-yesterday",
+            interval_seconds=15,
+            now=observed - timedelta(days=1),
+        )
+        session.add(
+            MarketCollectionRun(
+                id="recent-before-restart",
+                idempotency_key="recent-before-restart",
+                expected_trade_date=market_status.trade_date,
+                market_phase=market_status.phase,
+                requested_symbols=["600000.SH"],
+                started_at=observed - timedelta(seconds=25),
+                finished_at=observed - timedelta(seconds=23),
+                provider_summaries={},
+                quality_counts={"complete": 1},
+            )
+        )
+        restarting = run_operational_checks(
+            session,
+            settings=settings,
+            market_status=market_status,
+            observed_at=observed,
+            disk_usage=disk,
+        )
+    with session_factory_fixture.begin() as session:
+        missing = run_operational_checks(
+            session,
+            settings=settings,
+            market_status=market_status,
+            observed_at=observed + timedelta(seconds=61),
+            disk_usage=disk,
+        )
+
+    assert restarting["checks"]["heartbeat"]["ok"] is True
+    assert restarting["checks"]["heartbeat"]["instance_id"] is None
+    assert restarting["checks"]["heartbeat"]["liveness_source"] == "recent_collection"
+    assert restarting["alert_transitions"] == []
+    assert missing["checks"]["heartbeat"]["liveness_source"] == "none"
+    assert {item["alert_key"] for item in missing["active_issues"]} == {
+        "runtime.quote_watcher.heartbeat"
+    }
+
+
+def test_heartbeat_has_brief_grace_when_continuous_auction_opens(
+    database_settings: Settings,
+    session_factory_fixture: sessionmaker[Session],
+) -> None:
+    observed = datetime(2026, 9, 30, 1, 30, 5, tzinfo=UTC)
+    market_status = ChinaAStockCalendar({date(2026, 9, 30): True}).status_at(observed)
+    settings = database_settings.model_copy(
+        update={"disk_critical_free_bytes": 100, "disk_warning_free_bytes": 200}
+    )
+    with session_factory_fixture.begin() as session:
+        report = run_operational_checks(
+            session,
+            settings=settings,
+            market_status=market_status,
+            observed_at=observed,
+            disk_usage=lambda path: DiskUsage(10_000, 1_000, 9_000),
+        )
+
+    assert report["checks"]["heartbeat"]["ok"] is True
+    assert report["checks"]["heartbeat"]["liveness_source"] == "phase_start_grace"
+    assert report["checks"]["collection_gap"]["ok"] is True
+
+
+def test_clean_midday_restart_has_bounded_heartbeat_grace(
+    database_settings: Settings,
+    session_factory_fixture: sessionmaker[Session],
+) -> None:
+    observed = datetime(2026, 9, 30, 3, 32, 1, tzinfo=UTC)
+    market_status = ChinaAStockCalendar({date(2026, 9, 30): True}).status_at(observed)
+    settings = database_settings.model_copy(
+        update={"disk_critical_free_bytes": 100, "disk_warning_free_bytes": 200}
+    )
+    disk = lambda path: DiskUsage(10_000, 1_000, 9_000)  # noqa: E731
+    with session_factory_fixture.begin() as session:
+        start_runtime_heartbeat(
+            session,
+            service_name="quote_watcher",
+            instance_id="midday-restart",
+            interval_seconds=15,
+            now=observed - timedelta(minutes=25),
+        )
+        stop_runtime_heartbeat(
+            session,
+            instance_id="midday-restart",
+            now=observed - timedelta(seconds=17),
+            details={},
+        )
+        restarting = run_operational_checks(
+            session,
+            settings=settings,
+            market_status=market_status,
+            observed_at=observed,
+            disk_usage=disk,
+        )
+    with session_factory_fixture.begin() as session:
+        missing = run_operational_checks(
+            session,
+            settings=settings,
+            market_status=market_status,
+            observed_at=observed + timedelta(seconds=44),
+            disk_usage=disk,
+        )
+
+    assert market_status.phase is MarketPhase.MIDDAY_BREAK
+    assert restarting["checks"]["heartbeat"]["liveness_source"] == "recent_stop_grace"
+    assert restarting["alert_transitions"] == []
+    assert missing["checks"]["heartbeat"]["liveness_source"] == "none"
+    assert missing["alert_transitions"] == [
+        {"alert_key": "runtime.quote_watcher.heartbeat", "transition": "triggered"}
+    ]
+
+
 def test_heartbeat_is_not_required_outside_trading_day_runtime(
     database_settings: Settings,
     session_factory_fixture: sessionmaker[Session],
@@ -151,6 +288,31 @@ def test_heartbeat_is_not_required_outside_trading_day_runtime(
     assert not any(
         item["alert_key"] == "runtime.quote_watcher.heartbeat" for item in report["active_issues"]
     )
+
+
+def test_opening_auction_without_persisted_quotes_does_not_alert(
+    database_settings: Settings,
+    session_factory_fixture: sessionmaker[Session],
+) -> None:
+    observed = datetime(2026, 9, 28, 1, 20, tzinfo=UTC)
+    market_status = ChinaAStockCalendar({date(2026, 9, 28): True}).status_at(observed)
+    settings = database_settings.model_copy(
+        update={"disk_critical_free_bytes": 100, "disk_warning_free_bytes": 200}
+    )
+    with session_factory_fixture.begin() as session:
+        report = run_operational_checks(
+            session,
+            settings=settings,
+            market_status=market_status,
+            observed_at=observed,
+            disk_usage=lambda path: DiskUsage(10_000, 1_000, 9_000),
+        )
+
+    assert market_status.phase is MarketPhase.OPENING_CALL_AUCTION
+    assert report["ok"] is True
+    assert report["checks"]["heartbeat"]["applicable"] is False
+    assert report["checks"]["collection_gap"]["applicable"] is False
+    assert report["alert_transitions"] == []
 
 
 def test_active_session_collection_gap_triggers_and_recovers(

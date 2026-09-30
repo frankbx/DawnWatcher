@@ -30,6 +30,11 @@ stock-pool = [
 parquet = [
     "pyarrow>=25,<26",
 ]
+historical-minutes = [
+    "akshare>=1.18.97,<2",
+    "pandas>=2.2,<4",
+    "pyarrow>=25,<26",
+]
 
 [project.scripts]
 regimebeacon = "regimebeacon.cli:main"

@@ -20,12 +20,24 @@ def test_migration_applies_expected_schema(
     status = inspect_schema(database_settings, database_engine)
 
     assert status.ok is True
-    assert status.revision == "0006_minute_features"
+    assert status.revision == "0007_minute_query_indexes"
     assert status.integrity == "ok"
     assert status.journal_mode == "wal"
     assert status.foreign_keys is True
     assert status.synchronous == 2
     assert Path(status.database_path).is_file()
+    with database_engine.connect() as connection:
+        snapshot_plan = connection.exec_driver_sql(
+            "EXPLAIN QUERY PLAN SELECT id FROM provider_quote_snapshot "
+            "WHERE provider = 'tencent' AND fetched_at >= '2026-09-30 01:30:00' "
+            "AND fetched_at < '2026-09-30 01:32:00'"
+        ).all()
+        history_plan = connection.exec_driver_sql(
+            "EXPLAIN QUERY PLAN SELECT id FROM minute_bar "
+            "WHERE provider = 'tencent' AND minute_start IN ('2026-09-29 01:30:00')"
+        ).all()
+    assert any("ix_provider_quote_snapshot_provider_fetched" in row[3] for row in snapshot_plan)
+    assert any("ix_minute_bar_provider_start" in row[3] for row in history_plan)
 
 
 def test_tushare_migration_rewrites_existing_symbols(tmp_path: Path) -> None:

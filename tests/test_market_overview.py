@@ -15,6 +15,7 @@ from regimebeacon.analysis.market_overview import (
     format_market_overview_markdown,
 )
 from regimebeacon.domain import Exchange, QuoteProvider
+from regimebeacon.notifications.feishu import build_market_analysis_card
 from regimebeacon.storage.models import (
     MarketCollectionRun,
     MinuteBar,
@@ -82,6 +83,19 @@ def test_builds_explicit_fixed_sample_breadth_and_sector_confirmation(
     assert "风险动作" in markdown
     assert "固定样本当日广度" in markdown
     assert "不是全市场精确统计" in markdown
+    card = build_market_analysis_card(
+        markdown, direction=overview.temperature.label, report=overview.to_dict()
+    )
+    elements = card["body"]["elements"]
+    tables = [element for element in elements if element["tag"] == "table"]
+    assert len(tables) == 3
+    assert "68.00/100" in elements[0]["content"]
+    assert tables[0]["rows"] == [
+        {"period": "当日", "up": "1", "flat": "0", "down": "1"},
+        {"period": "近15分", "up": "1", "flat": "0", "down": "1"},
+    ]
+    assert tables[1]["rows"][0]["window"] == "**<font color='red'>+0.50%</font>**"
+    assert tables[2]["rows"][0]["sample"] == "**<font color='red'>+0.49%</font>**"
 
 
 def test_market_temperature_marks_broad_selloff_as_risk_contraction(

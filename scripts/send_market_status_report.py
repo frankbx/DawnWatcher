@@ -20,10 +20,16 @@ from regimebeacon.notifications.feishu import (
     FeishuWebhookClient,
     build_market_status_card,
 )
-from regimebeacon.ops.monitoring import QUOTE_WATCHER_SERVICE
+from regimebeacon.ops.monitoring import (
+    latest_quote_watcher_heartbeat,
+    recent_quote_watcher_stop_at,
+    recent_usable_collection_at,
+)
 from regimebeacon.storage.database import create_database_engine, create_session_factory
 from regimebeacon.storage.market_metrics import build_market_metrics_report
-from regimebeacon.storage.models import RuntimeHeartbeat
+from regimebeacon.storage.models import OperationalAlert
+
+_CURRENT_STATUS_WINDOW = timedelta(minutes=15)
 
 
 def parse_args() -> argparse.Namespace:
@@ -81,6 +87,7 @@ def build_status(
     observed_at: datetime,
     counts: dict[str, int],
 ) -> tuple[str, bool, dict[str, Any]]:
+    current_start_at = max(start_at, observed_at - _CURRENT_STATUS_WINDOW)
     engine = create_database_engine(settings)
     try:
         with create_session_factory(engine)() as session:
@@ -90,14 +97,31 @@ def build_status(
                 end_at=observed_at + timedelta(microseconds=1),
                 expected_interval_seconds=settings.market_poll_interval_seconds,
             )
-            heartbeat = session.scalar(
-                select(RuntimeHeartbeat)
-                .where(
-                    RuntimeHeartbeat.service_name == QUOTE_WATCHER_SERVICE,
-                    RuntimeHeartbeat.status == "running",
+            current_report = build_market_metrics_report(
+                session,
+                start_at=current_start_at,
+                end_at=observed_at + timedelta(microseconds=1),
+                expected_interval_seconds=settings.market_poll_interval_seconds,
+            )
+            active_alert_keys = list(
+                session.scalars(
+                    select(OperationalAlert.alert_key).where(OperationalAlert.status == "active")
                 )
-                .order_by(RuntimeHeartbeat.heartbeat_at.desc())
-                .limit(1)
+            )
+            heartbeat = latest_quote_watcher_heartbeat(
+                session, trade_date=observed_at.date(), observed_at=observed_at
+            )
+            recent_collection_at = recent_usable_collection_at(
+                session,
+                trade_date=observed_at.date(),
+                observed_at=observed_at,
+                within_seconds=settings.heartbeat_stale_seconds,
+            )
+            recent_stop_at = recent_quote_watcher_stop_at(
+                session,
+                trade_date=observed_at.date(),
+                observed_at=observed_at,
+                within_seconds=settings.heartbeat_stale_seconds,
             )
     finally:
         engine.dispose()
@@ -108,44 +132,98 @@ def build_status(
         else None
     )
     local_clock = observed_at.timetz().replace(tzinfo=None)
-    collection_expected = time(9, 15) <= local_clock <= time(11, 30) or time(
+    collection_expected = time(9, 30) <= local_clock <= time(11, 30) or time(
         13, 0
-    ) <= local_clock <= time(15, 0)
+    ) <= local_clock < time(14, 57)
+    phase_start = time(9, 30) if local_clock < time(12) else time(13)
+    phase_start_grace = (
+        collection_expected
+        and 0
+        <= (
+            observed_at
+            - datetime.combine(observed_at.date(), phase_start, tzinfo=observed_at.tzinfo)
+        ).total_seconds()
+        <= settings.heartbeat_stale_seconds
+    )
     heartbeat_ok = (
-        heartbeat_age is not None and heartbeat_age <= settings.heartbeat_stale_seconds
-    ) or not collection_expected
+        (heartbeat_age is not None and heartbeat_age <= settings.heartbeat_stale_seconds)
+        or recent_collection_at is not None
+        or recent_stop_at is not None
+        or phase_start_grace
+        or not collection_expected
+    )
     disk = shutil.disk_usage(settings.data_dir.resolve())
     metrics = report["metrics"]
     latency = metrics["latency_ms"]
     quality = report["quality_counts"]
     gaps = report["collection_gaps"]
-    healthy = bool(
+    historical_quality_ok = bool(
         report["collection_count"] > 0
-        and metrics["successful_run_rate_pct"] == 100.0
-        and metrics["valid_quote_rate_pct"] == 100.0
-        and gaps["count"] == 0
+        and metrics["successful_run_rate_pct"] >= settings.acceptance_min_successful_run_rate_pct
+        and metrics["valid_quote_rate_pct"] >= settings.acceptance_min_valid_quote_rate_pct
+        and (
+            gaps["max_seconds"] is None
+            or gaps["max_seconds"] <= settings.acceptance_max_gap_seconds
+        )
         and metrics["circuit_opened_count"] == 0
         and metrics["circuit_open_state_run_count"] == 0
+    )
+    current_metrics = current_report["metrics"]
+    current_gaps = current_report["collection_gaps"]
+    current_quality_ok = bool(
+        not collection_expected
+        or (phase_start_grace and current_report["collection_count"] == 0)
+        or (
+            current_report["collection_count"] > 0
+            and current_metrics["successful_run_rate_pct"]
+            >= settings.acceptance_min_successful_run_rate_pct
+            and current_metrics["valid_quote_rate_pct"]
+            >= settings.acceptance_min_valid_quote_rate_pct
+            and (
+                current_gaps["max_seconds"] is None
+                or current_gaps["max_seconds"] <= settings.acceptance_max_gap_seconds
+            )
+            and current_metrics["circuit_opened_count"] == 0
+            and current_metrics["circuit_open_state_run_count"] == 0
+        )
+    )
+    healthy = bool(
+        current_quality_ok
+        and not active_alert_keys
         and heartbeat_ok
         and disk.free > settings.disk_warning_free_bytes
     )
-    status_text = "正常" if healthy else "需关注"
+    status_text = "当前运行正常" if healthy else "当前运行需关注"
     complete = int(quality.get("complete", 0))
     non_complete = sum(int(value) for key, value in quality.items() if key != "complete")
     max_gap = f"{gaps['max_seconds']:.2f} 秒" if gaps["max_seconds"] is not None else "无"
     heartbeat_text = (
         f"{heartbeat_age:.1f} 秒"
-        if heartbeat_age is not None
-        else ("闭市后不要求运行" if not collection_expected else "缺失")
+        if heartbeat_age is not None and heartbeat_age <= settings.heartbeat_stale_seconds
+        else (
+            "心跳暂缺，行情仍在更新"
+            if recent_collection_at is not None
+            else (
+                "采集进程重启中"
+                if recent_stop_at is not None
+                else "开盘启动宽限期"
+                if phase_start_grace
+                else "当前时段不要求运行"
+                if not collection_expected
+                else "缺失或过期"
+            )
+        )
     )
     lines = [
         f"**状态**：{status_text}",
         f"**报告时间**：{observed_at.strftime('%Y-%m-%d %H:%M:%S %Z')}",
         f"**统计窗口**：{start_at.strftime('%H:%M:%S')} 至 {observed_at.strftime('%H:%M:%S')}",
+        f"**当日数据质量**：{'达标' if historical_quality_ok else '存在历史未达标项（不代表当前故障）'}",
         "",
         f"**监控范围**：{counts['total']} 只（主板股票 {counts['stocks']}，参考 ETF {counts['etfs']}）",
         f"**累计轮次**：{report['collection_count']}，完整轮次率 {percentage(metrics['successful_run_rate_pct'])}",
         f"**有效行情**：{metrics['valid_quote_count']}/{metrics['requested_quote_count']}（{percentage(metrics['valid_quote_rate_pct'])}）",
+        f"**健康阈值**：完整轮次 ≥{settings.acceptance_min_successful_run_rate_pct:g}%，有效行情 ≥{settings.acceptance_min_valid_quote_rate_pct:g}%，最大缺口 ≤{settings.acceptance_max_gap_seconds:g} 秒",
         f"**质量状态**：完整 {complete}，非完整 {non_complete}",
         f"**采集延迟**：平均 {milliseconds(latency['average'])}，P95 {milliseconds(latency['p95'])}，最大 {milliseconds(latency['max'])}",
         f"**采集缺口**：{gaps['count']} 次，最大 {max_gap}",
@@ -155,10 +233,14 @@ def build_status(
     ]
     details = {
         "healthy": healthy,
+        "historical_quality_ok": historical_quality_ok,
+        "current_quality_ok": current_quality_ok,
+        "active_alert_keys": active_alert_keys,
         "observed_at": observed_at.isoformat(),
         "heartbeat_age_seconds": heartbeat_age,
         "disk_free_bytes": disk.free,
         "report": report,
+        "current_report": current_report,
     }
     return "\n".join(lines), healthy, details
 

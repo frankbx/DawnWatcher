@@ -164,8 +164,8 @@ def test_merges_sealed_sessions_into_one_validated_daily_file(
     assert morning.complete is True
     assert afternoon.complete is True
     assert report.complete is True
-    assert report.row_count == 500
-    assert report.minute_count == 250
+    assert report.row_count == 480
+    assert report.minute_count == 240
     assert report.symbol_count == 2
     parquet_path = Path(report.parquet_path)
     manifest = json.loads(Path(report.manifest_path).read_text(encoding="utf-8"))
@@ -177,7 +177,10 @@ def test_merges_sealed_sessions_into_one_validated_daily_file(
         "afternoon",
     ]
     table = pq.read_table(parquet_path)
-    assert table.num_rows == 500
+    assert table.num_rows == 480
+    assert (
+        min(table.column("minute_start").to_pylist()).astimezone(_ZONE).strftime("%H:%M") == "09:30"
+    )
     assert set(table.column("session").to_pylist()) == {"morning", "afternoon"}
 
 
@@ -208,8 +211,8 @@ def test_daily_merge_propagates_incomplete_session_status(
     )
 
     assert report.complete is False
-    assert report.row_count == 262
-    assert report.minute_count == 131
+    assert report.row_count == 242
+    assert report.minute_count == 121
     assert len(report.missing_minutes) == 119
     assert Path(report.parquet_path).is_file()
 

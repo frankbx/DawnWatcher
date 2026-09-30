@@ -7,10 +7,11 @@ from datetime import datetime
 from statistics import fmean
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from regimebeacon.domain import DataQualityState
+from regimebeacon.market import MarketPhase
 from regimebeacon.storage.models import MarketCollectionRun, ReconciledQuoteSnapshot
 
 _PROVIDER_KEY = "tencent"
@@ -25,43 +26,60 @@ def build_market_metrics_report(
 ) -> dict[str, Any]:
     """Summarize Tencent availability, latency, quality, and collection gaps."""
     _validate_range(start_at, end_at)
-    all_collections = list(
+    phases = (MarketPhase.MORNING_CONTINUOUS, MarketPhase.AFTERNOON_CONTINUOUS)
+    all_collection_count = (
+        session.scalar(
+            select(func.count())
+            .select_from(MarketCollectionRun)
+            .where(
+                MarketCollectionRun.started_at >= start_at,
+                MarketCollectionRun.started_at < end_at,
+            )
+        )
+        or 0
+    )
+    continuous_collections = list(
         session.scalars(
             select(MarketCollectionRun)
             .where(
                 MarketCollectionRun.started_at >= start_at,
                 MarketCollectionRun.started_at < end_at,
+                MarketCollectionRun.market_phase.in_(phases),
             )
             .order_by(MarketCollectionRun.started_at)
         )
     )
-    collections = [item for item in all_collections if _is_single_source(item)]
+    collections = [item for item in continuous_collections if _is_single_source(item)]
     collection_ids = [item.id for item in collections]
-    reconciled = (
+    state_counts = (
         list(
-            session.scalars(
-                select(ReconciledQuoteSnapshot).where(
-                    ReconciledQuoteSnapshot.collection_id.in_(collection_ids)
-                )
+            session.execute(
+                select(ReconciledQuoteSnapshot.quality_state, func.count())
+                .where(ReconciledQuoteSnapshot.collection_id.in_(collection_ids))
+                .group_by(ReconciledQuoteSnapshot.quality_state)
             )
         )
         if collection_ids
         else []
     )
 
-    quality_counts = {
-        state.value: sum(snapshot.quality_state is state for snapshot in reconciled)
-        for state in DataQualityState
-    }
+    quality_counts = {state.value: 0 for state in DataQualityState}
+    quality_counts.update({state.value: count for state, count in state_counts})
     gap_durations = _collection_gap_durations(collections, expected_interval_seconds)
     return {
         "provider": _PROVIDER_KEY,
         "single_source_mode": True,
+        "market_phases": [
+            MarketPhase.MORNING_CONTINUOUS.value,
+            MarketPhase.AFTERNOON_CONTINUOUS.value,
+        ],
         "start_at": start_at.isoformat(),
         "end_at": end_at.isoformat(),
         "collection_count": len(collections),
-        "total_collection_count": len(all_collections),
-        "legacy_dual_collection_count": len(all_collections) - len(collections),
+        "total_collection_count": len(continuous_collections),
+        "legacy_dual_collection_count": len(continuous_collections) - len(collections),
+        "excluded_non_continuous_collection_count": all_collection_count
+        - len(continuous_collections),
         "requested_quote_count": sum(len(item.requested_symbols) for item in collections),
         "metrics": _provider_metrics(collections),
         "quality_counts": quality_counts,

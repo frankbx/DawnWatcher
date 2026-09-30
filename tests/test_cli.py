@@ -3,11 +3,21 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+from datetime import UTC, date, datetime
 from pathlib import Path
+from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
+from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import Session, sessionmaker
 
+from regimebeacon import cli
 from regimebeacon.cli import build_parser, main
+from regimebeacon.market import ChinaAStockCalendar
+from regimebeacon.storage.models import RuntimeHeartbeat
 
 
 def test_cli_without_command_prints_help(capsys: object) -> None:
@@ -71,6 +81,45 @@ def test_quote_watch_rejects_unsafe_interval() -> None:
         build_parser().parse_args(["quotes", "watch", "600000.SH", "--interval", "0.1"])
 
 
+def test_quote_watcher_ignores_sqlite_lock_on_heartbeat(
+    monkeypatch: pytest.MonkeyPatch,
+    session_factory_fixture: sessionmaker[Session],
+) -> None:
+    def locked(*args: object, **kwargs: object) -> None:
+        raise OperationalError(
+            "UPDATE runtime_heartbeat", {}, sqlite3.OperationalError("database is locked")
+        )
+
+    monkeypatch.setattr(cli, "touch_runtime_heartbeat", locked)
+    assert (
+        cli._touch_quote_watcher_heartbeat(
+            session_factory_fixture,
+            instance_id="quote-watcher",
+            interval_seconds=15,
+            details={"symbol_count": 397},
+        )
+        is False
+    )
+
+
+def test_quote_watcher_lazily_registers_heartbeat_after_initial_lock(
+    session_factory_fixture: sessionmaker[Session],
+) -> None:
+    assert cli._touch_quote_watcher_heartbeat(
+        session_factory_fixture,
+        instance_id="late-registration",
+        interval_seconds=15,
+        details={"symbol_count": 397},
+    )
+    with session_factory_fixture() as session:
+        heartbeat = session.scalar(
+            select(RuntimeHeartbeat).where(RuntimeHeartbeat.instance_id == "late-registration")
+        )
+    assert heartbeat is not None
+    assert heartbeat.status == "running"
+    assert heartbeat.details == {"symbol_count": 397}
+
+
 def test_one_shot_collection_is_gated_unless_explicitly_overridden() -> None:
     regular = build_parser().parse_args(["quotes", "collect", "600000.SH"])
     diagnostic = build_parser().parse_args(
@@ -79,6 +128,71 @@ def test_one_shot_collection_is_gated_unless_explicitly_overridden() -> None:
 
     assert regular.ignore_market_gate is False
     assert diagnostic.ignore_market_gate is True
+
+
+def test_opening_probe_has_no_persistence_or_archive_flags() -> None:
+    args = build_parser().parse_args(["quotes", "probe-opening", "600000.SH", "510300.SH"])
+
+    assert args.quote_command == "probe-opening"
+    assert args.symbols == ["600000.SH", "510300.SH"]
+    assert not hasattr(args, "no_persist")
+    assert not hasattr(args, "no_archive")
+
+
+def test_opening_probe_disables_both_writes(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    monkeypatch.setenv("REGIMEBEACON_DATA_DIR", str(tmp_path / "data"))
+    status = ChinaAStockCalendar({date(2026, 9, 28): True}).status_at(
+        datetime(2026, 9, 28, 1, 20, tzinfo=UTC)
+    )
+    calls: list[dict[str, object]] = []
+
+    async def fake_status(*args: object) -> tuple[object, dict[str, object]]:
+        return status, {}
+
+    async def fake_collect(*args: object, **kwargs: object) -> object:
+        calls.append(kwargs)
+        return SimpleNamespace(to_dict=lambda **kwargs: {"quality_counts": {}})
+
+    monkeypatch.setattr(cli, "_load_market_session_status", fake_status)
+    monkeypatch.setattr(cli, "_collect_quotes", fake_collect)
+
+    assert main(["quotes", "probe-opening", "600000.SH"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["event"] == "market.opening_probe.completed"
+    assert payload["persisted"] is False
+    assert payload["archived"] is False
+    assert calls[0]["archive_raw"] is False
+    assert not (tmp_path / "data").exists()
+
+
+def test_gate_override_still_cannot_archive_or_persist_opening_quotes(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    class OpeningClock(datetime):
+        @classmethod
+        def now(cls, tz: object = None) -> datetime:
+            local = datetime(2026, 9, 28, 9, 20, tzinfo=ZoneInfo("Asia/Shanghai"))
+            return local.astimezone(tz) if tz is not None else local
+
+    calls: list[dict[str, object]] = []
+
+    async def fake_collect(*args: object, **kwargs: object) -> object:
+        calls.append(kwargs)
+        return SimpleNamespace(to_dict=lambda: {"quality_counts": {}})
+
+    monkeypatch.setenv("REGIMEBEACON_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setattr(cli, "datetime", OpeningClock)
+    monkeypatch.setattr(cli, "_collect_quotes", fake_collect)
+
+    assert main(["quotes", "collect", "600000.SH", "--ignore-market-gate"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["opening_probe_mode"] is True
+    assert payload["persisted"] is False
+    assert payload["archived"] is False
+    assert calls[0]["archive_raw"] is False
+    assert not (tmp_path / "data").exists()
 
 
 def test_stats_and_monitor_commands_parse() -> None:

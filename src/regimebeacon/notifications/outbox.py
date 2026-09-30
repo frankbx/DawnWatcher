@@ -215,6 +215,43 @@ def mark_notification_failed(
     return notification
 
 
+def mark_notification_expired(
+    session: Session,
+    *,
+    notification_id: str,
+    lock_token: str,
+    now: datetime | None = None,
+) -> NotificationOutbox:
+    """Dead-letter a time-sensitive card without contacting its recipient."""
+    timestamp = now or utc_now()
+    notification = _get_owned_claim(session, notification_id, lock_token)
+    attempt_started_at = notification.locked_at or timestamp
+    notification.status = NotificationStatus.DEAD
+    notification.last_error = "notification expired before delivery"
+    _clear_lock(notification)
+    session.add(
+        NotificationAttempt(
+            notification_id=notification.id,
+            attempt_number=notification.attempt_count,
+            started_at=attempt_started_at,
+            finished_at=timestamp,
+            success=False,
+            error_message=notification.last_error,
+        )
+    )
+    append_audit_event(
+        session,
+        event_type="notification.expired",
+        entity_type="notification_outbox",
+        entity_id=notification.id,
+        correlation_id=notification.id,
+        payload={"event_type": notification.event_type},
+        occurred_at=timestamp,
+    )
+    session.flush()
+    return notification
+
+
 def recover_stale_notifications(
     session: Session,
     *,

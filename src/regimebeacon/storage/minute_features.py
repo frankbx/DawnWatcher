@@ -139,17 +139,20 @@ def build_minute_features(
     if target_minute is not None:
         target_utc = target_minute.astimezone(UTC)
         values = [value for value in values if value.minute_start == target_utc]
-    bars = _upsert_bars(session, values, trade_date=trade_date, provider=provider)
-    session.flush()
-
+    # Historical reads precede the first write, keeping SQLite's single-writer
+    # lock out of the potentially slower lookback query.
     history = _load_relative_volume_history(
         session,
         trade_date=trade_date,
         zone=zone,
-        symbols={bar.symbol for bar in bars},
+        symbols={value.symbol for value in values},
         provider=provider,
         lookback_days=relative_volume_lookback_days,
+        target_minute=target_minute,
     )
+    bars = _upsert_bars(session, values, trade_date=trade_date, provider=provider)
+    if bars:
+        session.flush()
     feature_count = _upsert_features(
         session,
         bars,
@@ -159,22 +162,23 @@ def build_minute_features(
         market_benchmark_symbol=market_benchmark_symbol,
         industry_benchmarks=mappings,
     )
-    append_audit_event(
-        session,
-        event_type="market.minute_features.built",
-        entity_type="trade_date",
-        entity_id=trade_date.isoformat(),
-        payload={
-            "provider": provider.value,
-            "snapshot_count": len(snapshots),
-            "minute_bar_count": len(bars),
-            "feature_count": feature_count,
-            "market_benchmark_symbol": market_benchmark_symbol,
-            "industry_mapping_count": len(mappings),
-            "relative_volume_lookback_days": relative_volume_lookback_days,
-            "relative_volume_minimum_history_days": relative_volume_minimum_history_days,
-        },
-    )
+    if bars:
+        append_audit_event(
+            session,
+            event_type="market.minute_features.built",
+            entity_type="trade_date",
+            entity_id=trade_date.isoformat(),
+            payload={
+                "provider": provider.value,
+                "snapshot_count": len(snapshots),
+                "minute_bar_count": len(bars),
+                "feature_count": feature_count,
+                "market_benchmark_symbol": market_benchmark_symbol,
+                "industry_mapping_count": len(mappings),
+                "relative_volume_lookback_days": relative_volume_lookback_days,
+                "relative_volume_minimum_history_days": relative_volume_minimum_history_days,
+            },
+        )
     return MinuteFeatureBuildReport(
         trade_date=trade_date,
         provider=provider.value,
@@ -371,6 +375,8 @@ def _upsert_bars(
     trade_date: date,
     provider: QuoteProvider,
 ) -> list[MinuteBar]:
+    if not values:
+        return []
     symbols = {value.symbol for value in values}
     statement = select(MinuteBar).where(
         MinuteBar.trade_date == trade_date,
@@ -378,6 +384,10 @@ def _upsert_bars(
     )
     if symbols:
         statement = statement.where(MinuteBar.symbol.in_(symbols))
+    statement = statement.where(
+        MinuteBar.minute_start >= min(value.minute_start for value in values),
+        MinuteBar.minute_start <= max(value.minute_start for value in values),
+    )
     existing = {(bar.symbol, bar.minute_start): bar for bar in session.scalars(statement)}
     bars: list[MinuteBar] = []
     for value in values:
@@ -424,29 +434,49 @@ def _load_relative_volume_history(
     symbols: set[str],
     provider: QuoteProvider,
     lookback_days: int,
+    target_minute: datetime | None,
 ) -> dict[tuple[str, int, int], list[int]]:
     if not symbols:
         return {}
     calendar_window = max(30, lookback_days * 4)
-    history_rows = list(
-        session.scalars(
-            select(MinuteBar)
-            .where(
-                MinuteBar.provider == provider,
-                MinuteBar.symbol.in_(symbols),
-                MinuteBar.trade_date < trade_date,
-                MinuteBar.trade_date >= trade_date - timedelta(days=calendar_window),
-                MinuteBar.volume_shares.is_not(None),
-            )
-            .order_by(MinuteBar.trade_date.desc())
-        )
+    statement = select(
+        MinuteBar.symbol,
+        MinuteBar.minute_start,
+        MinuteBar.volume_shares,
+        MinuteBar.trade_date,
+    ).where(
+        MinuteBar.provider == provider,
+        MinuteBar.volume_shares.is_not(None),
     )
+    if target_minute is not None:
+        # Exact instants can use the (provider, minute_start) index, unlike a
+        # strftime() expression over every historical row.
+        local_clock = target_minute.astimezone(zone).time()
+        historical_minutes = [
+            datetime.combine(
+                trade_date - timedelta(days=days_ago), local_clock, tzinfo=zone
+            ).astimezone(UTC)
+            for days_ago in range(1, calendar_window + 1)
+        ]
+        # A small pool can filter symbols after retrieving only exact historical
+        # minutes. That lets SQLite use the time-leading index instead of
+        # scanning each symbol's entire date range.
+        statement = statement.where(MinuteBar.minute_start.in_(historical_minutes))
+    else:
+        statement = statement.where(
+            MinuteBar.symbol.in_(symbols),
+            MinuteBar.trade_date < trade_date,
+            MinuteBar.trade_date >= trade_date - timedelta(days=calendar_window),
+        )
+    history_rows = session.execute(statement.order_by(MinuteBar.trade_date.desc()))
     history: dict[tuple[str, int, int], list[int]] = defaultdict(list)
-    for bar in history_rows:
-        local = bar.minute_start.astimezone(zone)
-        key = (bar.symbol, local.hour, local.minute)
-        if len(history[key]) < lookback_days and bar.volume_shares is not None:
-            history[key].append(bar.volume_shares)
+    for symbol, minute_start, volume_shares, _ in history_rows:
+        if symbol not in symbols or volume_shares is None:
+            continue
+        local = minute_start.astimezone(zone)
+        key = (symbol, local.hour, local.minute)
+        if len(history[key]) < lookback_days:
+            history[key].append(volume_shares)
     return dict(history)
 
 

@@ -8,13 +8,64 @@ import fcntl
 import json
 import os
 import threading
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
+from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 from scripts import watch_minute_sealer
 
 from regimebeacon.config import Settings
+from regimebeacon.storage.minute_parquet import MinuteTradingSession
+
+
+def test_finalize_only_rebuilds_missing_minute(
+    database_settings: Settings,
+    session_factory_fixture: object,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    del session_factory_fixture
+    zone = ZoneInfo("Asia/Shanghai")
+    missing = datetime(2026, 9, 30, 10, 40, tzinfo=zone)
+    rebuilt: list[datetime | None] = []
+    monkeypatch.setattr(
+        watch_minute_sealer,
+        "load_instrument_metadata",
+        lambda path: {"600000.SH": object()},
+    )
+    monkeypatch.setattr(watch_minute_sealer, "load_industry_map", lambda path: {})
+    monkeypatch.setattr(
+        watch_minute_sealer,
+        "missing_feature_minutes",
+        lambda *args, **kwargs: [missing],
+    )
+
+    def fake_build(*args: object, **kwargs: object) -> SimpleNamespace:
+        rebuilt.append(kwargs["minute_start"])
+        return SimpleNamespace(snapshot_count=0, minute_bar_count=0, feature_count=0)
+
+    monkeypatch.setattr(watch_minute_sealer, "build_minute_features", fake_build)
+    monkeypatch.setattr(
+        watch_minute_sealer,
+        "seal_minute_session",
+        lambda *args, **kwargs: SimpleNamespace(to_dict=lambda: {"complete": False}),
+    )
+    payload = watch_minute_sealer.finalize_and_seal(
+        database_settings,
+        trade_date=missing.date(),
+        trading_session=MinuteTradingSession.MORNING,
+        pool_file=tmp_path / "pool.json",
+        industry_map_file=tmp_path / "industry.json",
+        market_benchmark="510300.SH",
+        output_root=tmp_path / "lake",
+        observed_at=datetime(2026, 9, 30, 11, 32, tzinfo=zone),
+    )
+
+    assert rebuilt == [missing]
+    assert payload["feature_build"]["mode"] == "targeted_catch_up"
+    assert payload["feature_build"]["attempted_minutes"] == [missing.isoformat()]
 
 
 @pytest.mark.parametrize(

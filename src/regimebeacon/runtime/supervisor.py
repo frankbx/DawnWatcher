@@ -24,13 +24,15 @@ from regimebeacon.domain import QuoteSymbol
 from regimebeacon.market import MarketSessionStatus
 from regimebeacon.market.gate import TushareTradingSessionGate
 from regimebeacon.notifications.outbox import enqueue_notification
+from regimebeacon.portfolio.holdings import load_holdings
 from regimebeacon.storage.models import NotificationOutbox
 
 RestartPolicy = Literal["always", "on_failure", "never"]
 
 _OPERATIONS_START = time(8, 50)
 _DAILY_START = time(9, 14, 30)
-_ANALYSIS_START = time(9, 15)
+_QUOTE_START = time(9, 30)
+_ANALYSIS_START = time(9, 30)
 _MARKET_STOP = time(15, 0, 30)
 _ANALYSIS_STOP = time(15, 1)
 _OPERATIONS_STOP = time(15, 15)
@@ -39,6 +41,7 @@ _ACCEPTANCE_CATCHUP_STOP = time(23, 58)
 _RESTART_DELAY = timedelta(seconds=10)
 _MAX_DAILY_ATTEMPTS = 3
 _NOTIFICATION_DRAIN = timedelta(minutes=2)
+_HOLDINGS_REPORT_INTERVAL_MINUTES = 5
 
 
 class RuntimeAlreadyRunningError(RuntimeError):
@@ -116,6 +119,7 @@ class TradingDayRuntimeSupervisor:
         pool_file: Path,
         industry_map_file: Path,
         symbols_file: Path,
+        holdings_file: Path = Path("data/private/holdings.json"),
         market_benchmark: str = "510300.SH",
         analysis_window_minutes: int = 15,
         status_interval_minutes: int = 15,
@@ -135,6 +139,7 @@ class TradingDayRuntimeSupervisor:
         self.pool_file = _resolve_from_root(self.project_root, pool_file)
         self.industry_map_file = _resolve_from_root(self.project_root, industry_map_file)
         self.symbols_file = _resolve_from_root(self.project_root, symbols_file)
+        self.holdings_file = _resolve_from_root(self.project_root, holdings_file)
         self.market_benchmark = QuoteSymbol.parse(market_benchmark).ts_code
         self.analysis_window_minutes = analysis_window_minutes
         self.status_interval_minutes = status_interval_minutes
@@ -149,6 +154,12 @@ class TradingDayRuntimeSupervisor:
         self._last_phase: tuple[date, str] | None = None
         self._calendar_notice_dates: set[tuple[date, bool]] = set()
         self._symbols = _load_symbols(self.symbols_file)
+        if self.holdings_file.is_file():
+            self._symbols = tuple(
+                dict.fromkeys(
+                    (*self._symbols, *(item.symbol for item in load_holdings(self.holdings_file)))
+                )
+            )
         _require_file(self.pool_file)
         _require_file(self.industry_map_file)
 
@@ -245,6 +256,7 @@ class TradingDayRuntimeSupervisor:
             market_benchmark=self.market_benchmark,
             analysis_window_minutes=self.analysis_window_minutes,
             status_interval_minutes=self.status_interval_minutes,
+            holdings_file=self.holdings_file if self.holdings_file.is_file() else None,
         )
         desired = {plan.name: plan for plan in plans}
         for name in tuple(self._managed):
@@ -606,6 +618,7 @@ def build_runtime_service_plans(
     market_benchmark: str,
     analysis_window_minutes: int,
     status_interval_minutes: int,
+    holdings_file: Path | None = None,
 ) -> tuple[RuntimeServicePlan, ...]:
     """Return processes that should exist at one local wall-clock instant."""
     if local_now.tzinfo is None or local_now.utcoffset() is None:
@@ -614,6 +627,7 @@ def build_runtime_service_plans(
     zone = local_now.tzinfo
     operations_start = datetime.combine(trade_date, _OPERATIONS_START, tzinfo=zone)
     daily_start = datetime.combine(trade_date, _DAILY_START, tzinfo=zone)
+    quote_start = datetime.combine(trade_date, _QUOTE_START, tzinfo=zone)
     analysis_start = datetime.combine(trade_date, _ANALYSIS_START, tzinfo=zone)
     market_stop = datetime.combine(trade_date, _MARKET_STOP, tzinfo=zone)
     analysis_stop = datetime.combine(trade_date, _ANALYSIS_STOP, tzinfo=zone)
@@ -644,7 +658,7 @@ def build_runtime_service_plans(
     if not status.is_trading_day:
         return ()
 
-    if daily_start <= local_now < market_stop:
+    if quote_start <= local_now < market_stop:
         plans.append(
             RuntimeServicePlan(
                 name="quote_watcher",
@@ -675,6 +689,12 @@ def build_runtime_service_plans(
         and not _marker_is_terminal(acceptance_marker)
     )
     operations_active = operations_start <= local_now < operations_stop
+    if needs_acceptance:
+        support_stop = acceptance_catchup_stop
+    elif needs_sealer:
+        support_stop = seal_catchup_stop
+    else:
+        support_stop = operations_stop
     if operations_active or needs_sealer or needs_acceptance:
         plans.append(
             RuntimeServicePlan(
@@ -683,13 +703,7 @@ def build_runtime_service_plans(
                 command=(*module, "monitor", "watch"),
                 log_path=day_directory / "monitor.log",
                 restart_policy="always",
-                stop_at=(
-                    acceptance_catchup_stop
-                    if needs_acceptance
-                    else seal_catchup_stop
-                    if needs_sealer
-                    else operations_stop
-                ),
+                stop_at=support_stop,
             )
         )
     marker_last_modified = max(
@@ -704,6 +718,11 @@ def build_runtime_service_plans(
         marker_last_modified + _NOTIFICATION_DRAIN, day_end
     )
     if operations_active or needs_sealer or needs_acceptance or drain_active:
+        notification_stop = support_stop
+        if marker_last_modified is not None:
+            notification_stop = min(
+                day_end, max(notification_stop, marker_last_modified + _NOTIFICATION_DRAIN)
+            )
         plans.append(
             RuntimeServicePlan(
                 name="notification_worker",
@@ -711,19 +730,11 @@ def build_runtime_service_plans(
                 command=(*module, "notifications", "watch"),
                 log_path=day_directory / "notifications.log",
                 restart_policy="always",
-                stop_at=(
-                    acceptance_catchup_stop
-                    if needs_acceptance
-                    else seal_catchup_stop
-                    if needs_sealer
-                    else max(operations_stop, marker_last_modified + _NOTIFICATION_DRAIN)
-                    if marker_last_modified is not None
-                    else operations_stop
-                ),
+                stop_at=notification_stop,
             )
         )
 
-    if daily_start <= local_now < analysis_stop:
+    if analysis_start <= local_now < analysis_stop:
         deadline = datetime.combine(trade_date, time(15, 0), tzinfo=zone)
         plans.append(
             RuntimeServicePlan(
@@ -751,7 +762,7 @@ def build_runtime_service_plans(
         )
 
     if analysis_start <= local_now < analysis_stop:
-        start_at = datetime.combine(trade_date, _ANALYSIS_START, tzinfo=zone)
+        start_at = quote_start
         deadline = datetime.combine(trade_date, time(15, 0), tzinfo=zone)
         plans.append(
             RuntimeServicePlan(
@@ -776,6 +787,28 @@ def build_runtime_service_plans(
                 stop_at=analysis_stop,
             )
         )
+        if holdings_file is not None:
+            plans.append(
+                RuntimeServicePlan(
+                    name="holdings_report",
+                    trade_date=trade_date,
+                    command=(
+                        python,
+                        str(project_root / "scripts" / "watch_holdings.py"),
+                        "--holdings-file",
+                        str(holdings_file),
+                        "--until",
+                        deadline.isoformat(),
+                        "--interval-minutes",
+                        str(_HOLDINGS_REPORT_INTERVAL_MINUTES),
+                        "--benchmark",
+                        market_benchmark,
+                    ),
+                    log_path=day_directory / "holdings-report.log",
+                    restart_policy="on_failure",
+                    stop_at=analysis_stop,
+                )
+            )
 
     if needs_sealer:
         plans.append(

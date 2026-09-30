@@ -7,7 +7,7 @@ import shutil
 import socket
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -31,12 +31,11 @@ _MANAGED_ALERT_KEYS = {
 }
 _HEARTBEAT_REQUIRED_PHASES = frozenset(
     {
-        MarketPhase.OPENING_CALL_AUCTION,
-        MarketPhase.OPENING_PAUSE,
         MarketPhase.MORNING_CONTINUOUS,
         MarketPhase.MIDDAY_BREAK,
         MarketPhase.AFTERNOON_CONTINUOUS,
         MarketPhase.CLOSING_CALL_AUCTION,
+        MarketPhase.CLOSING_FINAL_QUOTE,
     }
 )
 
@@ -131,6 +130,68 @@ def stop_runtime_heartbeat(
     return heartbeat
 
 
+def latest_quote_watcher_heartbeat(
+    session: Session, *, trade_date: date, observed_at: datetime
+) -> RuntimeHeartbeat | None:
+    """Ignore orphaned running rows left by previous trading days."""
+    day_start = datetime.combine(trade_date, time.min, tzinfo=observed_at.tzinfo).astimezone(UTC)
+    return session.scalar(
+        select(RuntimeHeartbeat)
+        .where(
+            RuntimeHeartbeat.service_name == QUOTE_WATCHER_SERVICE,
+            RuntimeHeartbeat.status == "running",
+            RuntimeHeartbeat.started_at >= day_start,
+            RuntimeHeartbeat.started_at <= observed_at,
+        )
+        .order_by(RuntimeHeartbeat.started_at.desc())
+        .limit(1)
+    )
+
+
+def recent_usable_collection_at(
+    session: Session, *, trade_date: date, observed_at: datetime, within_seconds: float
+) -> datetime | None:
+    """Treat a fresh persisted quote batch as evidence of watcher liveness."""
+    recent = session.scalars(
+        select(MarketCollectionRun)
+        .where(
+            MarketCollectionRun.expected_trade_date == trade_date,
+            MarketCollectionRun.market_phase.in_(
+                (
+                    MarketPhase.MORNING_CONTINUOUS,
+                    MarketPhase.AFTERNOON_CONTINUOUS,
+                    MarketPhase.CLOSING_CALL_AUCTION,
+                    MarketPhase.CLOSING_FINAL_QUOTE,
+                )
+            ),
+            MarketCollectionRun.finished_at >= observed_at - timedelta(seconds=within_seconds),
+            MarketCollectionRun.finished_at <= observed_at,
+        )
+        .order_by(MarketCollectionRun.finished_at.desc())
+        .limit(100)
+    )
+    return next((run.finished_at for run in recent if _collection_is_usable(run)), None)
+
+
+def recent_quote_watcher_stop_at(
+    session: Session, *, trade_date: date, observed_at: datetime, within_seconds: float
+) -> datetime | None:
+    """Allow one stale-heartbeat window for a supervised clean restart."""
+    day_start = datetime.combine(trade_date, time.min, tzinfo=observed_at.tzinfo).astimezone(UTC)
+    return session.scalar(
+        select(RuntimeHeartbeat.stopped_at)
+        .where(
+            RuntimeHeartbeat.service_name == QUOTE_WATCHER_SERVICE,
+            RuntimeHeartbeat.status == "stopped",
+            RuntimeHeartbeat.started_at >= day_start,
+            RuntimeHeartbeat.stopped_at >= observed_at - timedelta(seconds=within_seconds),
+            RuntimeHeartbeat.stopped_at <= observed_at,
+        )
+        .order_by(RuntimeHeartbeat.stopped_at.desc())
+        .limit(1)
+    )
+
+
 def run_operational_checks(
     session: Session,
     *,
@@ -144,14 +205,10 @@ def run_operational_checks(
     issues: list[OperationalIssue] = []
     checks: dict[str, Any] = {}
 
-    heartbeat = session.scalar(
-        select(RuntimeHeartbeat)
-        .where(
-            RuntimeHeartbeat.service_name == QUOTE_WATCHER_SERVICE,
-            RuntimeHeartbeat.status == "running",
-        )
-        .order_by(RuntimeHeartbeat.heartbeat_at.desc())
-        .limit(1)
+    heartbeat = latest_quote_watcher_heartbeat(
+        session,
+        trade_date=market_status.trade_date,
+        observed_at=observed_at.astimezone(market_status.observed_at.tzinfo),
     )
     heartbeat_applicable = (
         market_status.calendar_date_known
@@ -161,9 +218,49 @@ def run_operational_checks(
     heartbeat_age: float | None = None
     if heartbeat is not None:
         heartbeat_age = max(0.0, (observed_at - heartbeat.heartbeat_at).total_seconds())
-    heartbeat_ok = not heartbeat_applicable or (
-        heartbeat_age is not None and heartbeat_age <= settings.heartbeat_stale_seconds
+    recent_collection_at = None
+    if heartbeat_applicable and (
+        heartbeat_age is None or heartbeat_age > settings.heartbeat_stale_seconds
+    ):
+        recent_collection_at = recent_usable_collection_at(
+            session,
+            trade_date=market_status.trade_date,
+            observed_at=observed_at,
+            within_seconds=settings.heartbeat_stale_seconds,
+        )
+    phase_start_grace = (
+        heartbeat_applicable
+        and market_status.phase.is_continuous
+        and 0
+        <= (observed_at - _phase_started_at(market_status)).total_seconds()
+        <= settings.heartbeat_stale_seconds
     )
+    recent_stop_at = None
+    if (
+        heartbeat_applicable
+        and (heartbeat_age is None or heartbeat_age > settings.heartbeat_stale_seconds)
+        and recent_collection_at is None
+        and not phase_start_grace
+    ):
+        recent_stop_at = recent_quote_watcher_stop_at(
+            session,
+            trade_date=market_status.trade_date,
+            observed_at=observed_at.astimezone(market_status.observed_at.tzinfo),
+            within_seconds=settings.heartbeat_stale_seconds,
+        )
+    if not heartbeat_applicable:
+        liveness_source = "not_required"
+    elif heartbeat_age is not None and heartbeat_age <= settings.heartbeat_stale_seconds:
+        liveness_source = "heartbeat"
+    elif recent_collection_at is not None:
+        liveness_source = "recent_collection"
+    elif phase_start_grace:
+        liveness_source = "phase_start_grace"
+    elif recent_stop_at is not None:
+        liveness_source = "recent_stop_grace"
+    else:
+        liveness_source = "none"
+    heartbeat_ok = liveness_source != "none"
     checks["heartbeat"] = {
         "ok": heartbeat_ok,
         "applicable": heartbeat_applicable,
@@ -171,6 +268,11 @@ def run_operational_checks(
         "instance_id": heartbeat.instance_id if heartbeat is not None else None,
         "last_seen_at": heartbeat.heartbeat_at.isoformat() if heartbeat is not None else None,
         "age_seconds": round(heartbeat_age, 3) if heartbeat_age is not None else None,
+        "liveness_source": liveness_source,
+        "recent_usable_collection_at": (
+            recent_collection_at.isoformat() if recent_collection_at is not None else None
+        ),
+        "recent_stop_at": recent_stop_at.isoformat() if recent_stop_at is not None else None,
         "stale_after_seconds": settings.heartbeat_stale_seconds,
         "reason": (
             "quote watcher is required during the scheduled trading-day runtime"
@@ -262,7 +364,7 @@ def _collection_gap_check(
     gap_seconds: float,
     heartbeat: RuntimeHeartbeat | None,
 ) -> dict[str, Any]:
-    if not market_status.collect_quotes:
+    if not market_status.phase.is_continuous:
         return {
             "ok": True,
             "applicable": False,

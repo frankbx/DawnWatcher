@@ -711,7 +711,7 @@ def _session_bounds(
 ) -> tuple[datetime, datetime]:
     if trading_session is MinuteTradingSession.MORNING:
         return (
-            datetime.combine(trade_date, time(9, 15), tzinfo=zone),
+            datetime.combine(trade_date, time(9, 30), tzinfo=zone),
             datetime.combine(trade_date, time(11, 30), tzinfo=zone),
         )
     return (
@@ -727,12 +727,7 @@ def _expected_minutes(
     result: list[datetime] = []
     current = start
     while current < end:
-        if (
-            trading_session is MinuteTradingSession.AFTERNOON
-            or current.time() < time(9, 25)
-            or current.time() >= time(9, 30)
-        ):
-            result.append(current)
+        result.append(current)
         current += timedelta(minutes=1)
     return tuple(result)
 

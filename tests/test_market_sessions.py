@@ -25,7 +25,9 @@ _SHANGHAI = ZoneInfo("Asia/Shanghai")
         ((13, 0, 0, 0), MarketPhase.AFTERNOON_CONTINUOUS, AuctionMode.CONTINUOUS, True),
         ((14, 57, 0, 0), MarketPhase.CLOSING_CALL_AUCTION, AuctionMode.CALL, True),
         ((15, 0, 0, 0), MarketPhase.CLOSING_CALL_AUCTION, AuctionMode.CALL, True),
-        ((15, 0, 0, 1), MarketPhase.POST_CLOSE, AuctionMode.NONE, False),
+        ((15, 0, 0, 1), MarketPhase.CLOSING_FINAL_QUOTE, AuctionMode.NONE, True),
+        ((15, 0, 29, 999999), MarketPhase.CLOSING_FINAL_QUOTE, AuctionMode.NONE, True),
+        ((15, 0, 30, 0), MarketPhase.POST_CLOSE, AuctionMode.NONE, False),
     ],
 )
 def test_session_boundaries_distinguish_call_and_continuous_auction(
@@ -45,6 +47,9 @@ def test_session_boundaries_distinguish_call_and_continuous_auction(
     assert status.phase is expected_phase
     assert status.auction_mode is auction_mode
     assert status.collect_quotes is collect_quotes
+    assert status.collect_production_quotes is (
+        collect_quotes and expected_phase is not MarketPhase.OPENING_CALL_AUCTION
+    )
 
 
 def test_tushare_closed_day_blocks_every_session() -> None:
