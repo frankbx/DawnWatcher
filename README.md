@@ -382,6 +382,80 @@ The 15:00 card requires a quote timestamp at or after 15:00; an auction-period q
 before the final match is marked "收盘价未确认" and suppresses final advice.
 The runtime only reads local Parquet files; AkShare is never called during trading.
 
+One unadjusted Sina daily bar per pool/holding symbol can be cached separately from
+both the real-time SQLite database and the minute-history files. Install the
+`historical-daily` optional dependencies, then run the paced, resumable downloader:
+
+```bash
+python scripts/download_sina_daily.py --trade-date YYYY-MM-DD
+```
+
+The output is `data/lake/sina_daily/trade_date=YYYY-MM-DD/day.parquet` with a
+manifest recording requested, returned, and missing symbols. It uses AkShare's
+Sina stock and ETF daily interfaces and does not adjust prices. A complete daily
+cache is **not** a substitute for quote snapshots or minute bars; this command
+does not delete SQLite data.
+
+To independently verify one cached day against Tushare's unadjusted stock
+`daily` and ETF `fund_daily` endpoints, with `token` in the project root:
+
+```bash
+python scripts/compare_tushare_sina_daily.py --trade-date YYYY-MM-DD
+```
+
+The matched comparison Parquet and JSON summary are written under
+`data/lake/tushare_sina_daily_compare/trade_date=YYYY-MM-DD/`. Tushare volume
+is converted from hands to shares/ETF units and amount from thousand yuan to yuan
+before comparing with Sina. The comparison does not modify SQLite.
+
+### Tushare daily data lake
+
+For the production daily cache, install the DuckDB/Parquet extra and keep the
+Tushare credential in the existing `token` file:
+
+```bash
+python -m pip install -e '.[daily-lake]'
+regimebeacon daily sync --date 2026-09-30
+regimebeacon daily backfill --start-date 2026-09-25 --end-date 2026-09-30
+regimebeacon daily status --date 2026-09-30
+regimebeacon daily history --symbol 002409.SZ --start-date 2026-09-30 --end-date 2026-09-30
+regimebeacon daily summary --date 2026-09-30
+```
+
+`sync` uses the configured pool plus any private holdings. It makes four
+date-wide Tushare requests: stock `daily`, ETF `fund_daily`, stock `adj_factor`,
+and ETF `fund_adj`. It requires a completed historical date, or 17:30 local time
+for today's date so that the later ETF factor feed can finish. Repeating a
+complete date with the same member set is idempotent. Use `--refresh` to pick
+up revised factors or prices. An ETF factor permission error fails the sync;
+there is no synthetic 1.0 factor fallback.
+`backfill` first checks the SSE Tushare trading calendar and skips closed
+dates. It is resumable by complete partition and capped at 30 trading days per
+invocation by default; increase `--max-trading-days` deliberately for longer
+ranges. The unattended runtime starts the same sync at 17:30 on trading days,
+retries failures until 23:50, and records the result under `data/reports/runtime/`.
+
+The immutable Parquet objects live in separate
+`data/lake/tushare_daily/dataset=price|factor/trade_date=YYYY-MM-DD/` trees.
+Prices are **unadjusted**. `vol` remains in Tushare hands and `amount` in
+thousand yuan; `adj_factor` is only in the factor dataset. No query silently
+applies an adjustment. SQLite `daily_lake_partition` stores the active object
+path, SHA-256, row/expected counts, member-set fingerprint and missing symbols.
+Only `complete` partitions are visible to DuckDB; partial dates remain
+auditable in `daily status`. Query-time checksums detect damaged files. On
+refresh, a new content-addressed object is written before the SQLite pointer
+changes, so a failed refresh retains the last complete version. Old inactive
+objects are retained for audit and are not automatically deleted.
+
+The `daily summary` breadth and turnover figures describe **only this configured
+pool and holdings**, not the full A-share market. A missing price row may reflect
+a suspension; until explicitly reconciled it is marked partial, never filled
+with a guessed bar. These daily files neither replace nor delete real-time
+snapshots, minute bars or the earlier Sina cache.
+Tushare's stock `pre_close` is the ex-rights reference close and `pct_chg` uses
+that reference, so `pct_chg` must not be reconstructed blindly from two raw
+`close` values around corporate actions.
+
 ## Quality checks
 
 ```bash

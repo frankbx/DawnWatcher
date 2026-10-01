@@ -71,6 +71,30 @@ class TimestampMixin:
     )
 
 
+class DailyLakePartition(TimestampMixin, Base):
+    """Active Parquet object and validation state for one Tushare daily dataset/date."""
+
+    __tablename__ = "daily_lake_partition"
+    __table_args__ = (
+        UniqueConstraint("dataset", "trade_date", name="uq_daily_lake_partition_dataset_date"),
+        Index("ix_daily_lake_partition_status_date", "status", "trade_date"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    dataset: Mapped[str] = mapped_column(String(20), nullable=False)
+    source: Mapped[str] = mapped_column(String(20), nullable=False, default="tushare")
+    trade_date: Mapped[date] = mapped_column(Date(), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    parquet_path: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    row_count: Mapped[int] = mapped_column(Integer(), nullable=False, default=0)
+    expected_count: Mapped[int] = mapped_column(Integer(), nullable=False)
+    member_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    missing_symbols: Mapped[list[str]] = mapped_column(JSON(), nullable=False, default=list)
+    error: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    schema_version: Mapped[int] = mapped_column(Integer(), nullable=False, default=1)
+
+
 class JobRun(TimestampMixin, Base):
     """One idempotent execution of a scheduled workflow."""
 

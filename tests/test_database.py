@@ -20,7 +20,7 @@ def test_migration_applies_expected_schema(
     status = inspect_schema(database_settings, database_engine)
 
     assert status.ok is True
-    assert status.revision == "0007_minute_query_indexes"
+    assert status.revision == "0008_daily_lake_control"
     assert status.integrity == "ok"
     assert status.journal_mode == "wal"
     assert status.foreign_keys is True

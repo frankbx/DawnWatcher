@@ -101,6 +101,20 @@ def test_runtime_stops_collection_and_can_catch_up_sealing(tmp_path: Path) -> No
     assert _plans(tmp_path, now=now, is_open=True) == ()
 
 
+def test_daily_cache_starts_at_1730_and_stops_after_terminal_marker(tmp_path: Path) -> None:
+    before = datetime(2026, 9, 30, 17, 29, tzinfo=_ZONE)
+    start = datetime(2026, 9, 30, 17, 30, tzinfo=_ZONE)
+    assert "daily_cache" not in {plan.name for plan in _plans(tmp_path, now=before, is_open=True)}
+    plans = _plans(tmp_path, now=start, is_open=True)
+    cache = next(plan for plan in plans if plan.name == "daily_cache")
+    assert cache.command[-2:] == ("--pool-file", str(tmp_path / "pool.json"))
+    assert cache.stop_at == datetime(2026, 9, 30, 23, 50, tzinfo=_ZONE)
+    assert cache.result_marker is not None
+    cache.result_marker.parent.mkdir(parents=True, exist_ok=True)
+    cache.result_marker.write_text(json.dumps({"terminal": True, "success": True}))
+    assert "daily_cache" not in {plan.name for plan in _plans(tmp_path, now=start, is_open=True)}
+
+
 def test_retryable_sealer_marker_starts_another_attempt(tmp_path: Path) -> None:
     now = datetime(2026, 9, 30, 16, 0, tzinfo=_ZONE)
     marker = tmp_path / "data" / "reports" / "runtime" / "2026-09-30" / "minute-sealer-result.json"

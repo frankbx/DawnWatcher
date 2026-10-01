@@ -67,6 +67,14 @@ def test_quote_watch_uses_configured_interval_by_default() -> None:
     assert args.max_runs is None
 
 
+def test_daily_backfill_parser_has_api_call_cap() -> None:
+    args = build_parser().parse_args(
+        ["daily", "backfill", "--start-date", "2026-09-25", "--end-date", "2026-09-30"]
+    )
+    assert args.daily_command == "backfill"
+    assert args.max_trading_days == 30
+
+
 def test_quote_watch_accepts_interval_override() -> None:
     args = build_parser().parse_args(
         ["quotes", "watch", "600000.SH", "--interval", "30", "--max-runs", "2"]

@@ -38,10 +38,22 @@ _ANALYSIS_STOP = time(15, 1)
 _OPERATIONS_STOP = time(15, 15)
 _SEAL_CATCHUP_STOP = time(23, 50)
 _ACCEPTANCE_CATCHUP_STOP = time(23, 58)
+_DAILY_CACHE_START = time(17, 30)
+_DAILY_CACHE_CATCHUP_STOP = time(23, 50)
 _RESTART_DELAY = timedelta(seconds=10)
 _MAX_DAILY_ATTEMPTS = 3
+_DAILY_CACHE_RESTART_DELAY = timedelta(minutes=30)
+_DAILY_CACHE_MAX_ATTEMPTS = 12
 _NOTIFICATION_DRAIN = timedelta(minutes=2)
 _HOLDINGS_REPORT_INTERVAL_MINUTES = 5
+
+
+def _max_attempts(plan: RuntimeServicePlan) -> int:
+    return _DAILY_CACHE_MAX_ATTEMPTS if plan.name == "daily_cache" else _MAX_DAILY_ATTEMPTS
+
+
+def _restart_delay(plan: RuntimeServicePlan) -> timedelta:
+    return _DAILY_CACHE_RESTART_DELAY if plan.name == "daily_cache" else _RESTART_DELAY
 
 
 class RuntimeAlreadyRunningError(RuntimeError):
@@ -274,7 +286,7 @@ class TradingDayRuntimeSupervisor:
             if local_now < self._next_restart_at.get(key, local_now):
                 continue
             attempts = self._attempt_count(plan)
-            if plan.restart_policy != "always" and attempts >= _MAX_DAILY_ATTEMPTS:
+            if plan.restart_policy != "always" and attempts >= _max_attempts(plan):
                 continue
             await self._start_process(plan, local_now)
 
@@ -345,7 +357,7 @@ class TradingDayRuntimeSupervisor:
             )
         except Exception as exc:
             handle.close()
-            self._next_restart_at[key] = local_now + _RESTART_DELAY
+            self._next_restart_at[key] = local_now + _restart_delay(plan)
             print(
                 json.dumps(
                     {
@@ -361,7 +373,7 @@ class TradingDayRuntimeSupervisor:
                 ),
                 flush=True,
             )
-            if attempt >= _MAX_DAILY_ATTEMPTS:
+            if attempt >= _max_attempts(plan):
                 self._enqueue_failure(plan, return_code=126, observed_at=local_now)
             if plan.result_marker is not None:
                 _write_result_marker(
@@ -373,9 +385,9 @@ class TradingDayRuntimeSupervisor:
                     finished_at=local_now,
                     log_path=plan.log_path,
                     attempt_count=attempt,
-                    terminal=attempt >= _MAX_DAILY_ATTEMPTS,
+                    terminal=attempt >= _max_attempts(plan),
                     failure_kind="transient_failure",
-                    retryable=attempt < _MAX_DAILY_ATTEMPTS,
+                    retryable=attempt < _max_attempts(plan),
                 )
             return
         self._managed[plan.name] = _ManagedProcess(
@@ -421,18 +433,18 @@ class TradingDayRuntimeSupervisor:
             terminal = (
                 (
                     plan.name == "minute_sealer"
-                    and (return_code == 0 or not retryable or attempts >= _MAX_DAILY_ATTEMPTS)
+                    and (return_code == 0 or not retryable or attempts >= _max_attempts(plan))
                 )
                 or (plan.name != "minute_sealer" and plan.restart_policy == "never")
                 or (
                     plan.restart_policy == "on_failure"
-                    and (return_code == 0 or attempts >= _MAX_DAILY_ATTEMPTS)
+                    and (return_code == 0 or attempts >= _max_attempts(plan))
                 )
             )
             if terminal:
                 self._completed.add(key)
             else:
-                self._next_restart_at[key] = local_now + _RESTART_DELAY
+                self._next_restart_at[key] = local_now + _restart_delay(plan)
             if plan.result_marker is not None:
                 _write_result_marker(
                     plan.result_marker,
@@ -461,7 +473,7 @@ class TradingDayRuntimeSupervisor:
                 ),
                 flush=True,
             )
-            if return_code != 0 and (terminal or attempts >= _MAX_DAILY_ATTEMPTS):
+            if return_code != 0 and (terminal or attempts >= _max_attempts(plan)):
                 self._enqueue_failure(plan, return_code=return_code, observed_at=local_now)
 
     async def _stop_process(self, name: str, *, reason: str) -> None:
@@ -634,10 +646,13 @@ def build_runtime_service_plans(
     operations_stop = datetime.combine(trade_date, _OPERATIONS_STOP, tzinfo=zone)
     seal_catchup_stop = datetime.combine(trade_date, _SEAL_CATCHUP_STOP, tzinfo=zone)
     acceptance_catchup_stop = datetime.combine(trade_date, _ACCEPTANCE_CATCHUP_STOP, tzinfo=zone)
+    daily_cache_start = datetime.combine(trade_date, _DAILY_CACHE_START, tzinfo=zone)
+    daily_cache_catchup_stop = datetime.combine(trade_date, _DAILY_CACHE_CATCHUP_STOP, tzinfo=zone)
     day_end = datetime.combine(trade_date, time(23, 59, 59), tzinfo=zone)
     day_directory = settings.data_dir / "reports" / "runtime" / trade_date.isoformat()
     result_marker = day_directory / "minute-sealer-result.json"
     acceptance_marker = day_directory / "daily-acceptance-result.json"
+    daily_cache_marker = day_directory / "daily-cache-result.json"
     python = sys.executable
     module = (python, "-m", "regimebeacon")
     plans: list[RuntimeServicePlan] = []
@@ -688,14 +703,20 @@ def build_runtime_service_plans(
         and sealer_finished
         and not _marker_is_terminal(acceptance_marker)
     )
+    needs_daily_cache = (
+        daily_cache_start <= local_now < daily_cache_catchup_stop
+        and not _marker_is_terminal(daily_cache_marker)
+    )
     operations_active = operations_start <= local_now < operations_stop
     if needs_acceptance:
         support_stop = acceptance_catchup_stop
     elif needs_sealer:
         support_stop = seal_catchup_stop
+    elif needs_daily_cache:
+        support_stop = daily_cache_catchup_stop
     else:
         support_stop = operations_stop
-    if operations_active or needs_sealer or needs_acceptance:
+    if operations_active or needs_sealer or needs_acceptance or needs_daily_cache:
         plans.append(
             RuntimeServicePlan(
                 name="monitor",
@@ -709,15 +730,17 @@ def build_runtime_service_plans(
     marker_last_modified = max(
         (
             value
-            for path in (result_marker, acceptance_marker)
+            for path in (result_marker, acceptance_marker, daily_cache_marker)
             if (value := _marker_modified_at(path, zone)) is not None
         ),
         default=None,
     )
-    drain_active = marker_last_modified is not None and local_now < min(
-        marker_last_modified + _NOTIFICATION_DRAIN, day_end
+    drain_active = (
+        marker_last_modified is not None
+        and marker_last_modified <= local_now
+        and local_now < min(marker_last_modified + _NOTIFICATION_DRAIN, day_end)
     )
-    if operations_active or needs_sealer or needs_acceptance or drain_active:
+    if operations_active or needs_sealer or needs_acceptance or needs_daily_cache or drain_active:
         notification_stop = support_stop
         if marker_last_modified is not None:
             notification_stop = min(
@@ -854,6 +877,27 @@ def build_runtime_service_plans(
                 restart_policy="on_failure",
                 stop_at=acceptance_catchup_stop,
                 result_marker=acceptance_marker,
+            )
+        )
+    if needs_daily_cache:
+        plans.append(
+            RuntimeServicePlan(
+                name="daily_cache",
+                trade_date=trade_date,
+                command=(
+                    *module,
+                    "daily",
+                    "sync",
+                    "--date",
+                    trade_date.isoformat(),
+                    "--pool-file",
+                    str(pool_file),
+                    *(("--holdings-file", str(holdings_file)) if holdings_file else ()),
+                ),
+                log_path=day_directory / "daily-cache.log",
+                restart_policy="on_failure",
+                stop_at=daily_cache_catchup_stop,
+                result_marker=daily_cache_marker,
             )
         )
     return tuple(plans)

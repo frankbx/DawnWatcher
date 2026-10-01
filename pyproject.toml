@@ -35,6 +35,16 @@ historical-minutes = [
     "pandas>=2.2,<4",
     "pyarrow>=25,<26",
 ]
+historical-daily = [
+    "akshare>=1.18.97,<2",
+    "pandas>=2.2,<4",
+    "pyarrow>=25,<26",
+    "tushare>=1.4,<2",
+]
+daily-lake = [
+    "duckdb>=1.4,<2",
+    "pyarrow>=25,<26",
+]
 
 [project.scripts]
 regimebeacon = "regimebeacon.cli:main"

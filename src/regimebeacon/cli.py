@@ -18,6 +18,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from regimebeacon import __version__
+from regimebeacon.analysis.daily_query import query_daily_history, summarize_daily_pool
 from regimebeacon.config import Settings
 from regimebeacon.diagnostics.comparison import DiagnosticComparisonRunner
 from regimebeacon.domain.quotes import MarketCollectionResult, QuoteSymbol
@@ -41,8 +42,15 @@ from regimebeacon.ops.monitoring import (
 )
 from regimebeacon.ops.recovery import run_startup_recovery
 from regimebeacon.providers.collector import MarketDataCollector, parse_symbols, replay_archive
+from regimebeacon.providers.tushare_calendar import TushareCalendarClient, read_tushare_token
+from regimebeacon.providers.tushare_daily import TushareDailyClient
 from regimebeacon.runtime import RuntimeAlreadyRunningError, TradingDayRuntimeSupervisor
 from regimebeacon.storage.backup import online_backup
+from regimebeacon.storage.daily_lake import (
+    list_daily_partitions,
+    load_daily_members,
+    sync_daily_date,
+)
 from regimebeacon.storage.database import create_database_engine, create_session_factory
 from regimebeacon.storage.market_metrics import build_market_metrics_report
 from regimebeacon.storage.market_quotes import persist_market_collection
@@ -106,6 +114,50 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Destination file; defaults to a timestamped file under data/backups.",
     )
+
+    daily_parser = subparsers.add_parser(
+        "daily", help="Sync Tushare raw daily bars and separate factors into the data lake."
+    )
+    daily_commands = daily_parser.add_subparsers(dest="daily_command", required=True)
+    daily_sync = daily_commands.add_parser("sync", help="Cache one completed trading date.")
+    daily_sync.add_argument("--date", type=date.fromisoformat, required=True)
+    daily_sync.add_argument(
+        "--pool-file", type=Path, default=Path("config/stock_pools/initial-v1/pool.json")
+    )
+    daily_sync.add_argument(
+        "--holdings-file", type=Path, default=Path("data/private/holdings.json")
+    )
+    daily_sync.add_argument("--refresh", action="store_true", help="Re-fetch even if complete.")
+    daily_backfill = daily_commands.add_parser(
+        "backfill", help="Cache an inclusive range of open SSE trading dates."
+    )
+    daily_backfill.add_argument("--start-date", type=date.fromisoformat, required=True)
+    daily_backfill.add_argument("--end-date", type=date.fromisoformat, required=True)
+    daily_backfill.add_argument(
+        "--pool-file", type=Path, default=Path("config/stock_pools/initial-v1/pool.json")
+    )
+    daily_backfill.add_argument(
+        "--holdings-file", type=Path, default=Path("data/private/holdings.json")
+    )
+    daily_backfill.add_argument("--refresh", action="store_true")
+    daily_backfill.add_argument(
+        "--max-trading-days",
+        type=_positive_integer,
+        default=30,
+        help="Safety cap for API calls (default: 30).",
+    )
+    daily_status = daily_commands.add_parser(
+        "status", help="Show SQLite partition validation state."
+    )
+    daily_status.add_argument("--date", type=date.fromisoformat)
+    daily_history = daily_commands.add_parser(
+        "history", help="Query raw OHLCV and factor by symbol."
+    )
+    daily_history.add_argument("--symbol", required=True)
+    daily_history.add_argument("--start-date", type=date.fromisoformat, required=True)
+    daily_history.add_argument("--end-date", type=date.fromisoformat, required=True)
+    daily_summary = daily_commands.add_parser("summary", help="Summarize the cached sample date.")
+    daily_summary.add_argument("--date", type=date.fromisoformat, required=True)
 
     calendar_parser = subparsers.add_parser(
         "calendar", help="Synchronize and inspect the cached Tushare trading calendar."
@@ -493,6 +545,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "db":
         return _run_database_command(settings, args)
 
+    if args.command == "daily":
+        return _run_daily_command(settings, args)
+
     if args.command == "calendar":
         return _run_calendar_command(settings, args)
 
@@ -515,6 +570,93 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_runtime_command(settings, args)
 
     parser.error(f"unknown command: {args.command}")
+
+
+def _run_daily_command(settings: Settings, args: argparse.Namespace) -> int:
+    """Keep network/Parquet work outside short SQLite control-plane transactions."""
+    lake_root = settings.data_dir / "lake" / "tushare_daily"
+    if args.daily_command in {"sync", "backfill"}:
+        local_now = datetime.now(ZoneInfo(settings.timezone))
+        end_date = args.date if args.daily_command == "sync" else args.end_date
+        if end_date > local_now.date() or (
+            end_date == local_now.date() and local_now.time() < time(17, 30)
+        ):
+            raise ValueError("daily sync requires a completed date (today after 17:30 local)")
+        if args.daily_command == "backfill" and args.end_date < args.start_date:
+            raise ValueError("backfill end_date cannot precede start_date")
+        members = load_daily_members(args.pool_file, args.holdings_file)
+        token = read_tushare_token(settings.tushare_token_file)
+        if args.daily_command == "sync":
+            dates = [args.date]
+        else:
+
+            async def trading_dates() -> list[date]:
+                async with TushareCalendarClient(
+                    token=token,
+                    api_url=settings.tushare_api_url,
+                    timeout_seconds=20.0,
+                ) as calendar:
+                    records = await calendar.fetch_calendar(
+                        exchange="SSE", start_date=args.start_date, end_date=args.end_date
+                    )
+                return [record.cal_date for record in records if record.is_open]
+
+            dates = asyncio.run(trading_dates())
+            if len(dates) > args.max_trading_days:
+                raise ValueError(
+                    f"backfill has {len(dates)} trading days, exceeds --max-trading-days={args.max_trading_days}"
+                )
+        upgrade_database(settings)
+        engine = create_database_engine(settings)
+        try:
+            with TushareDailyClient(
+                token=token,
+                api_url=settings.tushare_api_url,
+                timeout_seconds=20.0,
+            ) as source:
+                factory = create_session_factory(engine)
+                report = [
+                    item
+                    for trade_date in dates
+                    for item in sync_daily_date(
+                        source=source,
+                        session_factory=factory,
+                        lake_root=lake_root,
+                        trade_date=trade_date,
+                        members=members,
+                        refresh=args.refresh,
+                    )
+                ]
+        finally:
+            engine.dispose()
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0 if all(row["status"] == "complete" for row in report) else 3
+
+    engine = create_database_engine(settings)
+    try:
+        with create_session_factory(engine)() as session:
+            read_report: object
+            if args.daily_command == "status":
+                read_report = list_daily_partitions(session, trade_date=args.date)
+            elif args.daily_command == "history":
+                symbol = QuoteSymbol.parse(args.symbol).ts_code
+                read_report = query_daily_history(
+                    session,
+                    symbol=symbol,
+                    start_date=args.start_date,
+                    end_date=args.end_date,
+                    lake_root=lake_root,
+                )
+            elif args.daily_command == "summary":
+                read_report = summarize_daily_pool(
+                    session, trade_date=args.date, lake_root=lake_root
+                )
+            else:
+                raise ValueError(f"unsupported daily command: {args.daily_command}")
+    finally:
+        engine.dispose()
+    print(json.dumps(read_report, ensure_ascii=False, indent=2))
+    return 0
 
 
 def _run_database_command(settings: Settings, args: argparse.Namespace) -> int:
